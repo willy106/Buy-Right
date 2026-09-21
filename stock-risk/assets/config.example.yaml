@@ -1,0 +1,23 @@
+# 風控設定（範本）。複製成 config.yaml 再改；config.yaml 不進 git。
+capital: 1000000            # 總資金（元）← 改成你的
+risk_pct: 1.0               # 每筆最多虧總資金的 %（1R 金額 = capital × risk_pct% × 大盤係數）
+max_position_pct: 25        # 單檔部位上限（佔總資金 %）
+max_adv_pct: 2.0            # 買進股數上限 = 20 日均量的 %（流動性）
+min_stop_atr: 0.75          # 停損距離 < 此倍數 ATR14 時警告「停損太近、易被洗」
+
+# 大盤環境：分數 = 趨勢(0~4) + 出貨日(-2~0) + 漲跌家數(-1~+1)
+regime:
+  levels:                   # 由上往下比對 min_score
+    - {name: 多頭, min_score: 4, exposure_pct: 100, risk_mult: 1.0}
+    - {name: 震盪, min_score: 2, exposure_pct: 60, risk_mult: 0.75}
+    - {name: 空頭, min_score: -99, exposure_pct: 20, risk_mult: 0.5}
+  dist_window: 25           # 出貨日計算區間（交易日）
+  dist_drop_pct: 0.2        # 指數跌幅 ≥ 此 % 且成交金額大於前一日 → 出貨日
+  breadth_days: 10          # 漲跌家數累計天數（上市＋上櫃股票）
+
+# 移動停利：獲利達 activate_R 倍停損距離後啟動，只上移不下移
+trail:
+  activate_R: 1.0
+  breakeven: true           # 啟動後防守價至少拉到成本
+  rules: [ma10, atr3]       # ma<N>＝N 日均線；atr<k>＝進場後最高收盤 − k × ATR14
+  combine: max              # max＝取較高者（先觸發就出場）；min＝取較低者（較寬鬆）

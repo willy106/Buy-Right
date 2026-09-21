@@ -1,0 +1,18 @@
+# 只追蹤股票工具箱；其他 skill 不進這個 repo
+/*
+!/.gitignore
+!/README.md
+!/stock-fa/
+!/stock-flow/
+!/stock-journal/
+!/stock-risk/
+!/stock-ta/
+!/stock-watch/
+
+# 個人設定留在本機（範本是 *.example.yaml）
+stock-risk/assets/config.yaml
+stock-journal/assets/config.yaml
+stock-watch/assets/watchlist.yaml
+
+__pycache__/
+*.pyc

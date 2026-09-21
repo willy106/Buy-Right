@@ -1,0 +1,12 @@
+# 警示門檻（盤中）
+chg_pct_abs: 3.0          # 漲跌幅超過 ±3% 提醒
+near_level_pct: 1.0       # 距昨高/昨低、MA20 在 1% 內提醒
+group_top_n: 5            # 族群流入/流出各列幾個
+
+# 盤中短窗量比（flow_surge.py）：最近 N 分鐘量 ÷ 過去 20 日同時段均量
+surge_window_min: 15      # 窗口分鐘
+surge_warm: 2.0           # ≥ 此倍數標「放量」
+surge_hot: 3.0            # ≥ 此倍數標「爆量」
+surge_min_ret_pct: 0.2    # 窗口漲跌超過 ±此 % 才算流入/流出，否則「價平」
+surge_min_lots: 50        # 異動排行只列窗口成交 ≥ 此張數（濾掉冷門股）
+surge_top_n: 10           # 異動排行列幾檔

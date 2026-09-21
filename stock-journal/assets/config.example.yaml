@@ -1,0 +1,10 @@
+# 交易日誌設定（範本）。複製成 config.yaml 再改；config.yaml 不進 git。
+local_dir: ~/stock-journal            # 本機日誌資料夾（會被整個同步）
+rclone_remote: gdrive                  # rclone config 裡的 remote 名稱
+rclone_path: stock-journal             # Google Drive 上的資料夾
+auto_sync: true                        # 每次 add/close/check 後自動 rclone
+falsify_grace_days: 2                  # 證偽條件觸發後幾天內出場算「有守紀律」
+thesis_types: [族群流入, 技術突破, 均線回測, 基本面, 事件, 長期持有, 其他]
+longterm_types: [長期持有]            # 只追蹤現價與超額報酬，不進勝率/期望值統計、不做持有期提醒
+benchmark_tw: ^TWII                    # 台股同期大盤（上櫃股也用加權，方便跨股比較）
+benchmark_us: ^GSPC                    # 美股同期大盤
