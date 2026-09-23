@@ -77,6 +77,35 @@ def is_trading_now(now: datetime) -> bool:
     return now.weekday() < 5 and dtime(8, 45) <= now.time() <= dtime(13, 35)
 
 
+def group_outflow_streaks(fg: pd.DataFrame, now: datetime, alerts: dict, cache_dir: Path) -> dict[str, dict]:
+    """盤中各族群「連續判定流出」次數，存在當日狀態檔跨次執行累計。
+    判定流出 = 排在流出前 group_top_n 名，或 跌家>漲家 且 平均漲幅<0。
+    與上次判定間隔 < group_exit_min_gap_min 分鐘時不重複累計（沿用上次次數）。"""
+    if not len(fg):
+        return {}
+    n, total = alerts["group_top_n"], len(fg)
+    p = cache_dir / f"group_outflow_{now:%Y%m%d}.json"
+    try:
+        prev = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        prev = {}
+    gap_ok = True
+    if prev.get("_t"):
+        gap_ok = (now - datetime.fromisoformat(prev["_t"])).total_seconds() >= alerts.get("group_exit_min_gap_min", 3) * 60
+    st = {}
+    for i, g in fg.reset_index(drop=True).iterrows():
+        rank = i + 1
+        out_now = rank > total - n or (g["down"] > g["up"] and g["avg_chg"] < 0)
+        last = prev.get(g["group"], {}).get("streak", 0)
+        streak = (last + 1 if gap_ok else max(last, 1)) if out_now else 0
+        st[g["group"]] = {"streak": streak, "rank": rank, "total": total, "up": int(g["up"]), "down": int(g["down"]),
+                          "avg_chg": float(g["avg_chg"])}
+    if gap_ok:  # 間隔太短時不寫檔，下次仍以上次時間為基準累計
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"_t": now.isoformat(), **st}, ensure_ascii=False), encoding="utf-8")
+    return st
+
+
 def session_progress(now: datetime) -> float:
     """開盤已過比例（用來把盤中量換算成全日量）。"""
     start, end = now.replace(hour=9, minute=0, second=0), now.replace(hour=13, minute=30, second=0)
@@ -123,6 +152,13 @@ def main():
     sgd = {r["code"]: r for r in sg.to_dict("records")} if len(sg) else {}
     ta = {t["symbol"].split(".")[0]: t for t in (ta if isinstance(ta, list) else [ta])}
     prog = session_progress(now)
+    # 2c) 持倉族群流出警示用：族群連續流出次數（盤中、group_exit_start 之後）
+    gstreak = {}
+    if mode == "intraday" and alerts.get("group_exit_enable") and \
+            now.time() >= datetime.strptime(str(alerts.get("group_exit_start", "09:15")), "%H:%M").time():
+        gstreak = group_outflow_streaks(fg, now, alerts, Path(flowlib.CACHE))
+    held = set(jr) | set(wl.get("持股", []))
+    gexit_lines = []
 
     rows, alert_lines, seen = [], [], set()
     for cat, cs in wl.items():
@@ -180,6 +216,29 @@ def main():
                     elif gap < 2:
                         alert_lines.append(f"{c} 距{lab}僅 {gap:+.1f}%（#{int(j['id'])}）")
                 r["日誌"] = f"#{int(j['id'])} 持倉 @{ent} {pnl}{near}"
+            # 持倉族群流出警示：族群連續流出 + 個股爆量流出 +（浮盈 ≥ xR 或 跌破開盤／翻黑）
+            if gstreak and c in held and not q.empty and c in set(q.code):
+                need = alerts.get("group_exit_min_streak", 2)
+                outg = [(g, gstreak[g]) for g in gl if gstreak.get(g, {}).get("streak", 0) >= need]
+                if outg:
+                    x = q[q.code == c].iloc[0]; cur_p = float(x["last"]); sv = sgd.get(c) or {}
+                    dump = bool(sv.get("label")) and "流出" in sv["label"] and float(sv.get("ratio") or 0) >= alerts["surge_hot"]
+                    rmul = None
+                    if j is not None and pd.notna(j.get("stop_init")) and float(j["entry_price"]) > float(j["stop_init"]):
+                        rmul = (cur_p - float(j["entry_price"])) / (float(j["entry_price"]) - float(j["stop_init"]))
+                    weak = (pd.notna(x.get("open")) and cur_p < float(x["open"])) or (r["漲跌%"] or 0) < 0
+                    guard = (rmul is not None and rmul >= alerts.get("group_exit_profit_R", 1.0)) or weak
+                    g, s = outg[0]
+                    gdesc = f"{g} 連 {s['streak']} 次流出（rank {s['rank']}/{s['total']}，漲{s['up']}跌{s['down']}，均 {s['avg_chg']:+.2f}%）"
+                    why = "、".join(filter(None, [f"浮盈 {rmul:+.1f}R" if rmul is not None and rmul >= alerts.get("group_exit_profit_R", 1.0) else None,
+                                                   "跌破開盤" if pd.notna(x.get("open")) and cur_p < float(x["open"]) else None,
+                                                   "翻黑" if (r["漲跌%"] or 0) < 0 else None]))
+                    if dump and guard:
+                        gexit_lines.append(f"⚠️ 族群流出｜{c} {x['name']}：{gdesc}；個股 {int(sv['win_min'])}分 爆量流出 "
+                                           f"{sv['ratio']:.1f}x {sv['ret_pct']:+.1f}%；{why}（提醒，非出場規則）")
+                        flags.append("族群流出警示")
+                    else:
+                        gexit_lines.append(f"注意｜{c} {x['name']}：{gdesc}；個股尚未爆量流出或無利潤/轉弱條件")
             r["旗標"] = ", ".join(flags)
             for f in flags:
                 surge_tag = f[:2] in ("爆量", "放量") and "20日均量" not in f  # 短窗量比旗標，上面已提醒
@@ -187,6 +246,8 @@ def main():
                     alert_lines.append(f"{c} {f}")
             rows.append(r)
     wt = pd.DataFrame(rows)
+    gexit_lines.sort(key=lambda l: not l.startswith("⚠️"))  # ⚠️ 在前、注意在後
+    alert_lines = gexit_lines + alert_lines  # 族群流出警示排最前面
 
     # 3) 組報告
     ts = now.strftime("%Y-%m-%d %H:%M")
