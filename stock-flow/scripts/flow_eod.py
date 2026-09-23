@@ -15,7 +15,21 @@
 import argparse, json
 import numpy as np
 import pandas as pd
-from flowlib import load_groups, eod_prices, eod_institutional, snapshot_path, data_date, CACHE
+from flowlib import load_groups, eod_prices, eod_problems, eod_institutional, snapshot_path, data_date, CACHE
+
+
+def save_cache(df: pd.DataFrame, path, min_ratio: float = 0.9) -> bool:
+    """寫快取，但不讓明顯較少筆的資料蓋掉同一天已存在的快取（例如某市場抓到一半斷線）。"""
+    if path.exists():
+        try:
+            old = len(pd.read_csv(path))
+        except Exception:
+            old = 0
+        if old and len(df) < old * min_ratio:
+            print(f"[warn] 不覆蓋 {path.name}：新資料 {len(df)} 筆 < 既有 {old} 筆 × {min_ratio:g}")
+            return False
+    df.to_csv(path, index=False)
+    return True
 
 
 def build(groups: dict, px: pd.DataFrame, inst: pd.DataFrame) -> pd.DataFrame:
@@ -63,31 +77,54 @@ def chart(out: pd.DataFrame, path: str):
     fig.savefig(path, dpi=130, bbox_inches="tight"); plt.close(fig); print(f"[chart] {path}")
 
 
+def print_history(n: int):
+    """只讀快取，不需要當日資料。"""
+    files = sorted(CACHE.glob("eod_groups_*.csv"))[-n:]
+    if not files:
+        print("[warn] 沒有族群法人快取"); return
+    h = pd.concat([pd.read_csv(f).assign(date=f.stem[-8:]) for f in files])
+    print("\n【近日族群法人淨額 (M)】"); print(h.pivot_table(index="group", columns="date", values="inst_M").sort_values(h.date.max(), ascending=False).head(15).to_string())
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--groups"); ap.add_argument("--industry", action="store_true")
     ap.add_argument("--top", type=int, default=8); ap.add_argument("--chart"); ap.add_argument("--json")
     ap.add_argument("--history", type=int, default=0, help="顯示近 N 日族群法人淨額（需有快取）")
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="收盤資料不完整或兩市場日期不一致時仍輸出（不寫快取、結果標示為不完整）")
     a = ap.parse_args()
     groups = load_groups(a.groups, a.industry)
     px = eod_prices()
     if px.empty:
+        if a.history: print_history(a.history)
         raise SystemExit("盤後收盤資料取得失敗")
+    probs = eod_problems(px)
+    if probs:
+        msg = "；".join(probs) + f"。各市場資料日：{px.attrs.get('market_dates')}"
+        if not a.allow_partial:
+            if a.history: print_history(a.history)  # 歷史只讀快取，照樣顯示
+            raise SystemExit(f"[error] 收盤資料不可用：{msg}\n稍後重跑（上市 OpenAPI 常到晚上才更新；MI_INDEX 備援也失敗時）"
+                             "，或加 --allow-partial 看不完整結果（不寫快取）")
+        print(f"[warn] 收盤資料不完整，以下結果僅供參考、不寫快取：{msg}")
     inst = eod_institutional(data_date(px))            # 與收盤價同一交易日
+    im = inst.attrs.get("inst_markets", {})
+    inst_missing = [n for m, n in (("twse", "上市"), ("tpex", "上櫃")) if not im.get(m)]
     if inst.empty:
         print("[warn] 法人資料尚未公布或取得失敗，僅顯示成交值流向")
         inst = pd.DataFrame(columns=["code", "foreign_lots", "trust_lots", "dealer_lots"])
+    if inst_missing:
+        print(f"[warn] {'、'.join(inst_missing)}法人資料缺，族群法人數字不完整、不寫族群快取（稍後重跑）")
     out, merged = build(groups, px, inst)
     d = data_date(px)                                    # 以資料交易日命名，盤中跑也不會標錯日期
-    px.to_csv(snapshot_path("eod", d), index=False)      # 供盤中/盤後 5 日基準
-    out.to_csv(snapshot_path("eod_groups", d), index=False)
+    if not probs:                                        # 不完整的資料不進快取（會污染 5 日基準與 --history）
+        if save_cache(px, snapshot_path("eod", d)) and not inst_missing:  # 價格供 5 日基準；法人不全就不寫族群快取
+            out.to_csv(snapshot_path("eod_groups", d), index=False)
     cols = ["group", "inst_M", "foreign_M", "trust_M", "share_pct", "share_vs_5d", "inst_vs_turnover_pct", "avg_chg", "up", "down", "top_buy", "top_sell"]
     print("\n【法人淨流入 TOP】"); print(out.head(a.top)[cols].to_string(index=False))
     print("\n【法人淨流出 TOP】"); print(out.tail(a.top)[cols].iloc[::-1].to_string(index=False))
     if a.history:
-        files = sorted(CACHE.glob("eod_groups_*.csv"))[-a.history:]
-        h = pd.concat([pd.read_csv(f).assign(date=f.stem[-8:]) for f in files])
-        print("\n【近日族群法人淨額 (M)】"); print(h.pivot_table(index="group", columns="date", values="inst_M").sort_values(h.date.max(), ascending=False).head(15).to_string())
+        print_history(a.history)
     if a.chart:
         chart(out, a.chart)
     if a.json:

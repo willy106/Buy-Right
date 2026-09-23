@@ -29,6 +29,13 @@ python <skill_dir>/scripts/flow_surge.py --watch --interval 60                # 
 ```
 缺套件：`pip install pandas numpy requests pyyaml matplotlib yfinance`。
 
+### 盤後資料完整性（flow_eod）
+- 上市與上櫃收盤資料**必須同一交易日**。上市 OpenAPI（STOCK_DAY_ALL）常到晚上才更新，落後時自動改抓 MI_INDEX（收盤後約 14:30 即有），會印 `[info] … 改用 MI_INDEX`。
+- 任一市場收盤資料缺或日期不一致 → `[error] 收盤資料不可用` 並以非 0 結束、**不寫快取**。稍後重跑；真的要看就加 `--allow-partial`（結果不完整、不寫快取），回報時要講明哪個市場缺。
+- 任一市場法人資料缺（例：TPEx 3insti 斷線且 FinMind 也沒有）→ `[warn] …法人資料缺`，照常輸出但**不寫族群快取**；此時族群法人數字不完整，不要當【事實】引用，請稍後重跑。
+- 快取保護：新資料筆數 < 同日既有快取 90% 時不覆蓋。OpenAPI 請求遇斷線會自動重試 3 次。
+- `--history` 只讀快取，當日資料抓不到時仍會顯示。
+
 ## 解讀規則
 1. **資金流向 ≠ 漲幅**。判斷「流入」看 `share_vs_5d`（成交值佔比相對近 5 日）為正，且 `avg_chg` 為正、`up > down`；只有漲幅沒有佔比上升，寫「跟漲」不寫「資金流入」。
 2. 盤中成交值是 **估計值**（用 (開高低現)/4 近似 VWAP），標【推估】；盤後成交值與法人數字來自證交所／櫃買，標【事實】。

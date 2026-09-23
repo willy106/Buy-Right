@@ -4,9 +4,19 @@ near_level_pct: 1.0       # 距昨高/昨低、MA20 在 1% 內提醒
 group_top_n: 5            # 族群流入/流出各列幾個
 
 # 盤中短窗量比（flow_surge.py）：最近 N 分鐘量 ÷ 過去 20 日同時段均量
-surge_window_min: 15      # 窗口分鐘
+surge_window_min: 5       # 窗口分鐘
 surge_warm: 2.0           # ≥ 此倍數標「放量」
 surge_hot: 3.0            # ≥ 此倍數標「爆量」
 surge_min_ret_pct: 0.2    # 窗口漲跌超過 ±此 % 才算流入/流出，否則「價平」
 surge_min_lots: 50        # 異動排行只列窗口成交 ≥ 此張數（濾掉冷門股）
 surge_top_n: 10           # 異動排行列幾檔
+
+# 持倉族群流出警示（盤中，只提醒、不是出場規則）
+# 觸發：持倉所屬族群「連續 N 次」判定流出（在流出前 group_top_n 名，或 跌家>漲家 且平均漲幅<0）
+#       且 個股短窗「爆量流出」（≥ surge_hot、窗口 < -surge_min_ret_pct）
+#       且（浮盈 ≥ group_exit_profit_R 倍 R，或 跌破今日開盤／翻黑）
+group_exit_enable: true
+group_exit_min_streak: 2      # 族群連續幾次判定流出才算
+group_exit_start: "09:15"     # 這之前不判斷（開盤佔比失真）
+group_exit_min_gap_min: 3     # 兩次判定至少間隔幾分鐘才累計（避免連跑重複計數）
+group_exit_profit_R: 1.0      # 浮盈達幾 R 才視為「有利潤要保護」
