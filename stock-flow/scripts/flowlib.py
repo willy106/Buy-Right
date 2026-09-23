@@ -17,6 +17,18 @@ CACHE.mkdir(parents=True, exist_ok=True)
 UA = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 
+def get_json(url: str, tries: int = 3, **kw):
+    """requests.get(...).json()，連線中斷（TPEx OpenAPI 常見 IncompleteRead）時重試。"""
+    kw.setdefault("headers", UA); kw.setdefault("timeout", 30)
+    for i in range(tries):
+        try:
+            return requests.get(url, **kw).json()
+        except (requests.RequestException, ValueError):
+            if i == tries - 1:
+                raise
+            time.sleep(2 * (i + 1))
+
+
 def load_groups(extra: str | None = None, include_industry=False) -> dict[str, list[str]]:
     g = yaml.safe_load((ASSETS / "groups.yaml").read_text(encoding="utf-8")) or {}
     if include_industry and (ASSETS / "groups_industry.yaml").exists():
@@ -38,11 +50,11 @@ def market_map(codes: list[str]) -> dict[str, str]:
     if missing:
         tse, otc = set(), set()
         try:
-            tse = {str(r["Code"]) for r in requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=UA, timeout=30).json()}
+            tse = {str(r["Code"]) for r in get_json("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL")}
         except Exception as e:
             print(f"[warn] TWSE 清單: {e}")
         try:
-            otc = {str(r["SecuritiesCompanyCode"]) for r in requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", headers=UA, timeout=30).json()}
+            otc = {str(r["SecuritiesCompanyCode"]) for r in get_json("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes")}
         except Exception as e:
             print(f"[warn] TPEx 清單: {e}")
         for c in missing:
@@ -129,35 +141,84 @@ def _roc_date(d) -> str | None:
     return f"{int(d[:-4]) + 1911}{d[-4:]}" if len(d) >= 6 and d.isdigit() else None
 
 
-def eod_prices() -> pd.DataFrame:
-    """全市場最近一個交易日收盤：code, name, close, chg_pct, turnover_M, date（上市 OpenAPI + 上櫃 OpenAPI）
-       date 為資料本身的交易日（YYYYMMDD），盤中呼叫時會是前一交易日。"""
+def _twse_mi_index(d8: str) -> list[dict]:
+    """上市每日收盤行情（MI_INDEX，收盤後約 14:30 即有；STOCK_DAY_ALL OpenAPI 常到晚上才更新）。"""
+    js = get_json("https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
+                  params={"date": d8, "type": "ALLBUT0999", "response": "json"})
+    if js.get("stat") != "OK" or js.get("date") != d8:
+        return []
+    tbl = next((t for t in js.get("tables", []) if "每日收盤行情" in (t.get("title") or "")), None)
+    if not tbl:
+        return []
+    f = {k: i for i, k in enumerate(tbl["fields"])}
     out = []
+    for row in tbl["data"]:
+        try:
+            sign = -1 if "-" in re.sub(r"<[^>]+>", "", row[f["漲跌(+/-)"]]) else 1
+            out.append({"code": row[f["證券代號"]].strip(), "name": row[f["證券名稱"]].strip(),
+                        "close": float(row[f["收盤價"]].replace(",", "")),
+                        "chg": sign * _num(row[f["漲跌價差"]]), "turnover_M": _num(row[f["成交金額"]]) / 1e6,
+                        "date": d8, "mkt": "twse"})
+        except (ValueError, KeyError):
+            pass  # 無成交（收盤價 "--"）
+    return out
+
+
+def eod_prices(expect: str | None = None) -> pd.DataFrame:
+    """全市場最近一個交易日收盤：code, name, close, chg_pct, turnover_M, date, mkt（上市 + 上櫃）
+       date 為資料本身的交易日（YYYYMMDD），盤中呼叫時會是前一交易日。
+       兩市場日期必須一致：目標日 = expect 或兩市場較新的那天；上市 OpenAPI 落後時改抓 MI_INDEX 補。
+       各市場實際日期放在 df.attrs["market_dates"]，呼叫端用 eod_problems() 檢查。"""
+    twse, tpex = [], []
     try:
-        for r in requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=UA, timeout=30).json():
+        for r in get_json("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"):
             try:
-                out.append({"code": r["Code"], "name": r["Name"], "close": float(r["ClosingPrice"].replace(",", "")),
-                            "chg": float(r["Change"].replace(",", "")), "turnover_M": float(r["TradeValue"].replace(",", "")) / 1e6,
-                            "date": _roc_date(r.get("Date"))})
+                twse.append({"code": r["Code"], "name": r["Name"], "close": float(r["ClosingPrice"].replace(",", "")),
+                             "chg": float(r["Change"].replace(",", "")), "turnover_M": float(r["TradeValue"].replace(",", "")) / 1e6,
+                             "date": _roc_date(r.get("Date")), "mkt": "twse"})
             except (ValueError, KeyError):
                 pass
     except Exception as e:
         print(f"[warn] TWSE STOCK_DAY_ALL: {e}")
     try:
-        for r in requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", headers=UA, timeout=30).json():
+        for r in get_json("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"):
             try:
-                out.append({"code": r["SecuritiesCompanyCode"], "name": r["CompanyName"], "close": float(r["Close"].replace(",", "")),
-                            "chg": float(r["Change"].replace(",", "")),
-                            "turnover_M": float((r.get("TransactionAmount") or r["TradingAmount"]).replace(",", "")) / 1e6,
-                            "date": _roc_date(r.get("Date"))})
+                tpex.append({"code": r["SecuritiesCompanyCode"], "name": r["CompanyName"], "close": float(r["Close"].replace(",", "")),
+                             "chg": float(r["Change"].replace(",", "")),
+                             "turnover_M": float((r.get("TransactionAmount") or r["TradingAmount"]).replace(",", "")) / 1e6,
+                             "date": _roc_date(r.get("Date")), "mkt": "tpex"})
             except (ValueError, KeyError):
                 pass
     except Exception as e:
         print(f"[warn] TPEx close quotes: {e}")
-    df = pd.DataFrame(out)
+
+    def mdate(rows):
+        s = pd.Series([r["date"] for r in rows]).dropna()
+        return s.mode().iloc[0] if len(s) else None
+    target = expect or max(filter(None, [mdate(twse), mdate(tpex)]), default=None)
+    if target and mdate(twse) != target:
+        try:
+            alt = _twse_mi_index(target)
+        except Exception as e:
+            alt = []; print(f"[warn] TWSE MI_INDEX: {e}")
+        if alt:
+            print(f"[info] 上市 OpenAPI 資料日 {mdate(twse)} ≠ {target}，改用 MI_INDEX {target}")
+            twse = alt
+    df = pd.DataFrame(twse + tpex)
     if len(df):
         df["chg_pct"] = df["chg"] / (df["close"] - df["chg"]) * 100
+    df.attrs["market_dates"] = {"twse": mdate(twse), "tpex": mdate(tpex)}
+    df.attrs["target"] = target
     return df
+
+
+def eod_problems(px: pd.DataFrame) -> list[str]:
+    """收盤資料是否可用：兩市場都要有、且日期一致。回傳問題清單（空 = 可用）。"""
+    md, target = px.attrs.get("market_dates", {}), px.attrs.get("target")
+    name = {"twse": "上市", "tpex": "上櫃"}
+    probs = [f"{name[m]}收盤資料缺" for m in ("twse", "tpex") if not md.get(m)]
+    probs += [f"{name[m]}資料日 {d} ≠ 目標日 {target}（來源尚未更新）" for m, d in md.items() if d and target and d != target]
+    return probs
 
 
 def _num(x) -> float:
@@ -177,12 +238,11 @@ def eod_institutional(date_str: str | None = None) -> pd.DataFrame:
        上市：twse.com.tw rwd T86（舊 OpenAPI /v1/fund/T86 已下線）；上櫃：TPEx OpenAPI。
        任一市場取不到或全為 0 → 用 FinMind 補該市場缺的部分。
        date_str：YYYYMMDD 或 YYYY-MM-DD，應傳 eod_prices() 的資料日，避免價格與法人錯日。
-       回傳 code, foreign_lots, trust_lots, dealer_lots"""
+       回傳 code, foreign_lots, trust_lots, dealer_lots；attrs["inst_markets"] = 各市場是否有資料"""
     d8 = (date_str or f"{pd.Timestamp.today():%Y%m%d}").replace("-", "")
     twse, tpex = [], []
     try:
-        js = requests.get("https://www.twse.com.tw/rwd/zh/fund/T86", params={"date": d8, "selectType": "ALLBUT0999", "response": "json"},
-                          headers=UA, timeout=30).json()
+        js = get_json("https://www.twse.com.tw/rwd/zh/fund/T86", params={"date": d8, "selectType": "ALLBUT0999", "response": "json"})
         if js.get("stat") == "OK" and js.get("date") == d8:
             f = {k: i for i, k in enumerate(js["fields"])}
             col = lambda row, name: _num(row[f[name]]) / 1000
@@ -195,7 +255,7 @@ def eod_institutional(date_str: str | None = None) -> pd.DataFrame:
     except Exception as e:
         print(f"[warn] TWSE T86: {e}")
     try:
-        for r in requests.get("https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading", headers=UA, timeout=30).json():
+        for r in get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading"):
             if _roc_date(r.get("Date")) != d8:  # OpenAPI 只給最新一日，日期不符就不用
                 continue
             n = _norm_keys(r)
@@ -221,11 +281,15 @@ def eod_institutional(date_str: str | None = None) -> pd.DataFrame:
                 keep = [r for r in (twse if alive(twse) else []) + (tpex if alive(tpex) else [])]
                 have = {r["code"] for r in keep}
                 print(f"[info] FinMind 補 {'上市' if not alive(twse) else ''}{'上櫃' if not alive(tpex) else ''} 法人資料")
-                return pd.concat([pd.DataFrame(keep), fmd[~fmd.code.isin(have)]], ignore_index=True)
+                out = pd.concat([pd.DataFrame(keep), fmd[~fmd.code.isin(have)]], ignore_index=True)
+                out.attrs["inst_markets"] = {"twse": True, "tpex": True}  # FinMind 為全市場
+                return out
             print(f"[warn] FinMind 無 {d} 法人資料")
         except Exception as e:
             print(f"[warn] FinMind fallback: {e}")
-    return pd.DataFrame([r for r in twse + tpex], columns=["code", "foreign_lots", "trust_lots", "dealer_lots"])
+    out = pd.DataFrame([r for r in twse + tpex], columns=["code", "foreign_lots", "trust_lots", "dealer_lots"])
+    out.attrs["inst_markets"] = {"twse": bool(alive(twse)), "tpex": bool(alive(tpex))}  # 呼叫端據此判斷是否完整
+    return out
 
 
 def data_date(px: pd.DataFrame) -> str:
