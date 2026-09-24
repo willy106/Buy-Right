@@ -42,11 +42,42 @@ def all_codes(groups: dict) -> list[str]:
     return sorted({c for v in groups.values() for c in v})
 
 
+def theme_map() -> tuple[dict[str, list[str]], dict[str, int], int | None]:
+    """MoneyDJ 細題材（themes_sync.py 產生）。回傳 (代號 → 題材清單，小題材在前), 題材 → 檔數, 資料天數；沒檔案回傳空。"""
+    p = CACHE / "themes_moneydj.json"
+    if not p.exists():
+        return {}, {}, None
+    js = json.loads(p.read_text())
+    size = {k: len(v["codes"]) for k, v in js["themes"].items()}
+    m: dict[str, list[str]] = {}
+    for k in sorted(size, key=size.get):
+        for c in js["themes"][k]["codes"]:
+            m.setdefault(c, []).append(k)
+    age = (pd.Timestamp.now() - pd.Timestamp(js["updated"])).days
+    return m, size, age
+
+
+def market_universe(min_turnover_m: float = 50.0) -> list[str]:
+    """全市場普通股（4 碼、非 0 開頭，排除 ETF／權證）中，最近一份盤後快取成交值 ≥ min_turnover_m 百萬的代號。
+       用來把掃描範圍擴大到族群清單以外；沒有盤後快取時回傳空（先跑一次 flow_eod.py）。"""
+    files = sorted(CACHE.glob("eod_2*.csv"))
+    if not files:
+        return []
+    d = pd.read_csv(files[-1], dtype={"code": str})
+    return sorted(d[d.code.str.fullmatch(r"[1-9]\d{3}") & (d.turnover_M >= min_turnover_m)].code)
+
+
 # ---------------------------------------------------------------- 上市/上櫃判定（快取 30 天）
 def market_map(codes: list[str]) -> dict[str, str]:
     p = CACHE / "market_map.json"
     m = json.loads(p.read_text()) if p.exists() and time.time() - p.stat().st_mtime < 30 * 86400 else {}
     missing = [c for c in codes if c not in m]
+    if missing:   # 先用最近一份盤後快取的 mkt 欄（twse/tpex）補，OpenAPI 常斷線
+        files = sorted(CACHE.glob("eod_2*.csv"))
+        if files:
+            e = pd.read_csv(files[-1], dtype={"code": str}, usecols=["code", "mkt"]).set_index("code")["mkt"].to_dict()
+            m.update({c: {"twse": "tse", "tpex": "otc"}[e[c]] for c in missing if e.get(c) in ("twse", "tpex")})
+            missing = [c for c in codes if c not in m]
     if missing:
         tse, otc = set(), set()
         try:
@@ -59,8 +90,7 @@ def market_map(codes: list[str]) -> dict[str, str]:
             print(f"[warn] TPEx 清單: {e}")
         for c in missing:
             m[c] = "tse" if c in tse else "otc" if c in otc else "unknown"
-        if tse or otc:
-            p.write_text(json.dumps({k: v for k, v in m.items() if v != "unknown"}))
+    p.write_text(json.dumps({k: v for k, v in m.items() if v != "unknown"}))
     return {c: m[c] for c in codes}
 
 
@@ -81,6 +111,8 @@ def realtime_quotes(codes: list[str], mkt: dict[str, str], batch=90, pause=3.0) 
         except Exception as e:
             print(f"[warn] realtime batch {i}: {e}"); continue
         for r in js.get("msgArray", []):
+            if not r.get("c"):   # 上市/上櫃都查時，查不到的那邊會回空殼
+                continue
             def f(k):
                 v = r.get(k, "-")
                 try: return float(v) if v not in ("-", "", None) else None
@@ -196,6 +228,10 @@ def eod_prices(expect: str | None = None) -> pd.DataFrame:
         s = pd.Series([r["date"] for r in rows]).dropna()
         return s.mode().iloc[0] if len(s) else None
     target = expect or max(filter(None, [mdate(twse), mdate(tpex)]), default=None)
+    now = pd.Timestamp.now(tz="Asia/Taipei")
+    today = now.strftime("%Y%m%d")
+    if not expect and target != today and now.weekday() < 5 and now.hour * 60 + now.minute >= 14 * 60 + 30:
+        target = today   # 兩個 OpenAPI 都落後（或上櫃斷線）時，仍試抓今天的 MI_INDEX；休市日 MI_INDEX 回空，會退回原目標日
     if target and mdate(twse) != target:
         try:
             alt = _twse_mi_index(target)
@@ -204,6 +240,8 @@ def eod_prices(expect: str | None = None) -> pd.DataFrame:
         if alt:
             print(f"[info] 上市 OpenAPI 資料日 {mdate(twse)} ≠ {target}，改用 MI_INDEX {target}")
             twse = alt
+        elif target == today and not expect:
+            target = max(filter(None, [mdate(twse), mdate(tpex)]), default=None)
     df = pd.DataFrame(twse + tpex)
     if len(df):
         df["chg_pct"] = df["chg"] / (df["close"] - df["chg"]) * 100

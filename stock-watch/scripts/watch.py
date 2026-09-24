@@ -146,7 +146,8 @@ def main():
     # 2b) 短窗量比（盤中）：掃族群清單 ∪ 自選，同時存即時量快照
     sg = pd.DataFrame()
     if mode == "intraday":
-        surge = run_json(flow_dir, "flow_surge.py", codes + ["--window", str(alerts["surge_window_min"]),
+        surge = run_json(flow_dir, "flow_surge.py", codes + ["--universe", alerts.get("surge_universe", "groups"),
+                         "--min-turnover", str(alerts.get("surge_min_turnover_m", 50)), "--window", str(alerts["surge_window_min"]),
                          "--warm", str(alerts["surge_warm"]), "--hot", str(alerts["surge_hot"]), "--min-ret", str(alerts["surge_min_ret_pct"])])
         sg = pd.DataFrame(surge["rows"]) if surge else pd.DataFrame()
     sgd = {r["code"]: r for r in sg.to_dict("records")} if len(sg) else {}
@@ -271,14 +272,49 @@ def main():
         sn = alerts["surge_top_n"]
         top = sg[(sg.win_lots.fillna(0) >= alerts["surge_min_lots"])].sort_values("ratio", ascending=False).head(sn).copy()
         top["win_min"] = top["win_min"].astype("Int64")
-        top["族群"] = ["、".join(group_of(c, groups)) or "-" for c in top.code]
+        known = set(flowlib.all_codes(groups)) | set(codes)
+        tmap, tsize, tage = flowlib.theme_map()
+        def theme_of(c, k=2):   # 清單外個股：MoneyDJ 細題材（小題材在前）
+            return "、".join(tmap.get(c, [])[:k]) or "?"
+        top["族群"] = ["、".join(group_of(c, groups)) or ("自選" if c in codes else f"清單外｜{theme_of(c)}") for c in top.code]
         top = top.rename(columns={"code": "代號", "name": "名稱", "chg_pct": "今日%", "win_min": "窗口分", "win_lots": "窗口張",
                                   "exp_lots": "同時段均張", "ratio": "短窗量比", "ret_pct": "窗口%", "label": "標籤", "src": "來源"})
         delayed = (~sg.src.fillna("").eq("snap")).any()
-        md += [f"\n## 盤中異動（族群清單+自選，短窗量比前 {sn}）",
+        md += [f"\n## 盤中異動（{'全市場' if alerts.get('surge_universe') == 'market' else '族群清單+自選'}，短窗量比前 {sn}）",
                "短窗量比 = 最近 N 分鐘量 ÷ 過去 20 日同時段均量；≥{:g} 放量、≥{:g} 爆量，窗口漲跌決定流入/流出。".format(alerts["surge_warm"], alerts["surge_hot"])
                + ("\n來源 yf~HH:MM = 當天首次執行，用 yfinance 5 分 K（延遲約 20 分，資料到該時間）；15 分鐘後再跑即改用即時快照。" if delayed else ""),
                top[["代號", "名稱", "族群", "今日%", "窗口分", "窗口張", "同時段均張", "短窗量比", "窗口%", "標籤", "來源"]].to_markdown(index=False)]
+        # 清單外異動：不在族群清單／自選／日誌、正在放量或爆量流入的個股，並找同題材聚集
+        out = sg[~sg.code.isin(known) & (sg.win_lots.fillna(0) >= alerts["surge_min_lots"])
+                 & sg.label.fillna("").str.contains("流入")].sort_values("ratio", ascending=False)
+        if alerts.get("surge_universe") == "market":
+            on = alerts.get("outside_top_n", 8)
+            md.append(f"\n## 清單外異動（全市場昨日成交值 ≥{alerts.get('surge_min_turnover_m', 50):g} 百萬、族群清單與自選以外，放量／爆量流入）")
+            if tage is None:
+                md.append("（沒有題材資料：先跑 `stock-flow/scripts/themes_sync.py`）")
+            elif tage > 30:
+                md.append(f"（題材資料已 {tage} 天，建議重跑 `stock-flow/scripts/themes_sync.py`）")
+            if len(out):
+                t = out.head(on).copy()
+                t["題材"] = [theme_of(c, 3) for c in t.code]
+                t["win_min"] = t["win_min"].astype("Int64")
+                md.append(t.rename(columns={"code": "代號", "name": "名稱", "chg_pct": "今日%", "win_min": "窗口分", "win_lots": "窗口張",
+                                            "ratio": "短窗量比", "ret_pct": "窗口%", "label": "標籤", "src": "來源"})
+                          [["代號", "名稱", "題材", "今日%", "窗口分", "窗口張", "短窗量比", "窗口%", "標籤", "來源"]].to_markdown(index=False))
+                # 同題材 ≥ N 檔同時流入 → 可能是清單沒涵蓋的題材行情；同一組個股只留最小（最具體）的題材
+                cmin = alerts.get("outside_cluster_min", 2)
+                hits: dict[str, list[str]] = {}
+                for c, n in zip(out.code, out.name):
+                    for th in tmap.get(c, []):
+                        hits.setdefault(th, []).append(f"{c} {n}")
+                seen, clusters = set(), []
+                for th, cs in sorted(hits.items(), key=lambda kv: (-len(kv[1]), tsize.get(kv[0], 999))):
+                    if len(cs) >= cmin and frozenset(cs) not in seen:
+                        seen.add(frozenset(cs)); clusters.append(f"- {th}（題材共 {tsize.get(th, '?')} 檔）：{'、'.join(cs)}")
+                if clusters:
+                    md += ["題材聚集（清單外同題材多檔同時流入 → 可能是族群清單沒涵蓋的行情，要追蹤就加進 groups.yaml）：", *clusters[:5]]
+            else:
+                md.append("- 無")
     md += ["\n## 自選標的", wt.to_markdown(index=False)]
     if mode == "intraday":
         md.append("短窗量比：最近 N 分鐘量 ÷ 20 日同時段均量，後附窗口漲跌；* = 延遲資料。量比(換算) 為全日換算，僅供參考。")

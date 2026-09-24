@@ -14,7 +14,7 @@ python <skill_dir>/scripts/watch.py 2330 3017 6669        # 臨時加幾檔（�
 python <skill_dir>/scripts/watch.py --eod                 # 強制盤後版
 python <skill_dir>/scripts/watch.py --out /tmp/watch.md --json /tmp/watch.json
 ```
-腳本自己判斷交易時段；盤中約 30–45 秒（即時報價數批 + 各標的日線 + 短窗量比；當天首次會多花約 20 秒建同時段基準）。使用者只給代號沒說別的 → 直接跑，不要追問。
+腳本自己判斷交易時段；盤中約 30–45 秒，全市場掃描再加約 30–60 秒（即時報價數批 + 各標的日線 + 短窗量比；當天首次要建約 570 檔同時段基準，多花約 2 分鐘——08:58 的 `flow_surge.py --watch --universe market` 取樣器會先建好）。使用者只給代號沒說別的 → 直接跑，不要追問。
 
 ## 你要做的事（腳本印出報告後）
 1. **先給 5 行以內的口頭結論**：資金在哪（真流入的族群 1–2 個）、自選標的裡誰在動、要注意什麼。再貼腳本產生的表。
@@ -23,6 +23,8 @@ python <skill_dir>/scripts/watch.py --out /tmp/watch.md --json /tmp/watch.json
 4. **放量／爆量看「短窗量比」**＝最近 N 分鐘量 ÷ 過去 20 日同時段均量（≥2 放量、≥3 爆量；窗口漲跌決定流入／流出／價平）。它反映「此刻」，已消除台股 U 型量能偏差。
    - 標 `*` 或來源 `yf~HH:MM` = 當天首次執行，用 yfinance 5 分 K，**延遲約 20 分**，要講明「這是 HH:MM 前的狀況」。每次執行都會存即時快照，15 分鐘內再跑一次就變成即時。
    - 「盤中異動」排行裡不在自選的標的，是這個功能的重點——點出最強 1–2 檔及其族群，同族群多檔同時爆量流入才算族群行情，單檔就是個股。
+   - **掃描範圍**：`alerts.yaml` 的 `surge_universe: market`（預設）＝族群清單＋自選，再加全市場普通股中昨日成交值 ≥ `surge_min_turnover_m`（50 百萬，約 570 檔），用來找使用者**本來不知道**的標的。改 `groups` 只掃清單（較快）。全市場模式需要至少一份 `flow_eod` 盤後快取。
+   - **「清單外異動」區**：不在族群清單／自選／日誌、正在放量或爆量流入的個股，附 MoneyDJ 細題材（小題材在前）。**分類一律用題材，不用官方產業別。**「題材聚集」＝清單外同題材 ≥2 檔同時流入 → 可能是族群清單沒涵蓋的行情，結論裡要點出，並問使用者要不要把該題材加進 `stock-flow/assets/groups.yaml`；單檔就是個股行情。題材資料缺或超過 30 天，報告會提醒重跑 `stock-flow/scripts/themes_sync.py`（約 6–8 分鐘，可背景跑）。
    - 爆量流入 ≠ 進場訊號：窗口漲幅小但量極大可能是換手或大單出貨，搭配族群流向與 stock-ta 判斷；不建議追。
    - 量比(換算) 是全日累計換算，只供參考、不觸發警示。
 5. 警示區重複的（同一檔多條）合併成一行講。
@@ -49,4 +51,4 @@ python <skill_dir>/scripts/watch.py --out /tmp/watch.md --json /tmp/watch.json
 
 ## 排程（使用者要「每天自動」時）
 Claude Code 排程或 cron：`0 9,10,11,12 * * 1-5` 跑盤中，`35 15 * * 1-5` 跑 `--eod`（同時累積 stock-flow 的 5 日基準）。
-想讓每次盯盤都拿到即時短窗量比：`58 8 * * 1-5` 背景跑 `stock-flow/scripts/flow_surge.py --watch --interval 60`（每分鐘存快照，13:31 自動結束）。
+想讓每次盯盤都拿到即時短窗量比：`58 8 * * 1-5` 背景跑 `stock-flow/scripts/flow_surge.py --watch --interval 60 --universe market`（每分鐘存快照，13:31 自動結束）。
