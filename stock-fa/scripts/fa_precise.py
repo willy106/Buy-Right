@@ -12,7 +12,10 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from data import normalize, tw_code, finmind, fetch_ohlcv, cached, dump
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stock-common"))   # 共用資料層
+from stockdata import normalize, tw_code, finmind, fetch_ohlcv, cached, dump
 from fa_quick import snapshot as quick_snapshot
 
 

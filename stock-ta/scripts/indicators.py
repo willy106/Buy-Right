@@ -134,3 +134,35 @@ def mpf_style(symbol: str):
         mc = mpf.make_marketcolors(up="#d62728", down="#2ca02c", edge="inherit", wick="inherit", volume="inherit")
         return mpf.make_mpf_style(base_mpf_style="yahoo", marketcolors=mc)
     return "yahoo"
+
+
+def gaps(df: pd.DataFrame, close: float, lookback=60, min_pct=0.25, n=3) -> dict:
+    """未回補的跳空缺口：向上缺口＝前日高～當日低，向下缺口＝當日高～前日低。
+    之後 K 線若部分回補，只留下未回補的區間；完全回補就剔除。缺口在現價下方為支撐、上方為壓力。"""
+    d = df.tail(lookback + 1)
+    h, l, v, idx = d["High"].values, d["Low"].values, d["Volume"].values, d.index
+    vma = df["Volume"].rolling(20).mean().shift().reindex(idx).values
+    out = []
+    for i in range(1, len(d)):
+        up = l[i] > h[i - 1]
+        if not (up or h[i] < l[i - 1]):
+            continue
+        lo, hi = (h[i - 1], l[i]) if up else (h[i], l[i - 1])
+        if (hi - lo) / lo * 100 < min_pct:
+            continue
+        rest_lo, rest_hi = lo, hi
+        if i + 1 < len(d):
+            if up: rest_hi = min(hi, l[i + 1:].min())      # 之後最低點往下吃進缺口
+            else:  rest_lo = max(lo, h[i + 1:].max())      # 之後最高點往上吃進缺口
+        if rest_hi <= rest_lo:
+            continue                                        # 已完全回補
+        vr = round(float(v[i] / vma[i]), 2) if vma[i] and not np.isnan(vma[i]) else None
+        out.append({"date": str(idx[i].date()), "dir": "向上" if up else "向下",
+                    "zone": [round(float(lo), 2), round(float(hi), 2)],
+                    "unfilled": [round(float(rest_lo), 2), round(float(rest_hi), 2)],
+                    "filled_pct": round(float(1 - (rest_hi - rest_lo) / (hi - lo)) * 100, 0),
+                    "vol_ratio": vr})
+    sup = [g for g in out if g["unfilled"][0] < close]      # 現價在缺口內也算支撐（正在回測）
+    res = [g for g in out if g["unfilled"][0] >= close]
+    return {"support": sorted(sup, key=lambda g: -g["unfilled"][1])[:n],
+            "resistance": sorted(res, key=lambda g: g["unfilled"][0])[:n]}

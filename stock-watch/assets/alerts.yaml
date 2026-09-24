@@ -10,6 +10,10 @@ surge_hot: 3.0            # ≥ 此倍數標「爆量」
 surge_min_ret_pct: 0.2    # 窗口漲跌超過 ±此 % 才算流入/流出，否則「價平」
 surge_min_lots: 50        # 異動排行只列窗口成交 ≥ 此張數（濾掉冷門股）
 surge_top_n: 10           # 異動排行列幾檔
+surge_universe: market    # groups = 只掃族群清單＋自選；market = 再加全市場普通股（找清單外的異動）
+surge_min_turnover_m: 50  # market 模式：昨日成交值 ≥ 此百萬元才掃（約 570 檔）
+outside_top_n: 8          # 「清單外異動」列幾檔
+outside_cluster_min: 2    # 清單外同題材幾檔同時流入才列「題材聚集」
 
 # 持倉族群流出警示（盤中，只提醒、不是出場規則）
 # 觸發：持倉所屬族群「連續 N 次」判定流出（在流出前 group_top_n 名，或 跌家>漲家 且平均漲幅<0）

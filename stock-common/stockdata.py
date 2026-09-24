@@ -1,4 +1,4 @@
-"""Shared data layer — free sources only.
+"""Shared data layer — free sources only.（stock-ta／fa／risk／journal 共用，改這一份就好）
 
 Sources (all $0):
   * yfinance          : OHLCV + fundamentals for TW (.TW/.TWO) and US tickers
@@ -9,7 +9,7 @@ Every fetch is cached on disk (~/.cache/stock-toolbox) so repeated runs
 cost zero calls. TTL is per dataset.
 """
 from __future__ import annotations
-import hashlib, json, os, re, time
+import hashlib, json, logging, os, re, time
 from pathlib import Path
 import pandas as pd
 import requests
@@ -39,10 +39,26 @@ def normalize(ticker: str) -> tuple[str, str]:
     """Return (yfinance_symbol, market). '2330' -> ('2330.TW','TW'); 'AAPL' -> ('AAPL','US')."""
     t = ticker.strip().upper()
     if re.fullmatch(r"\d{4,6}[A-Z]?", t):
-        return f"{t}.TW", "TW"
+        return _tw_suffix(t), "TW"
     if t.endswith(".TW") or t.endswith(".TWO"):
         return t, "TW"
     return t, "US"
+
+
+def _tw_suffix(code: str) -> str:
+    """上市 .TW／上櫃 .TWO：用 yfinance 近 5 日行情試，結果快取 30 天。都抓不到就回 .TW。"""
+    import yfinance as yf
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+    def _probe():
+        for sym in (f"{code}.TW", f"{code}.TWO"):
+            try:
+                if len(yf.Ticker(sym).history(period="5d")):
+                    return pd.Series([sym])
+            except Exception:
+                pass
+        return None
+    s = cached(f"suffix:{code}", 60 * 60 * 24 * 30, _probe)
+    return s.iloc[0] if s is not None and len(s) else f"{code}.TW"
 
 
 def tw_code(symbol: str) -> str:

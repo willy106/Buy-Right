@@ -13,7 +13,9 @@ description: 台股盤中／盤後「族群資金流向」工具（免費即時�
 | 13:30 後或問「今天法人」「收盤後」 | `scripts/flow_eod.py` | 法人資料約 15:30 上市、16:00 上櫃後才齊 |
 | 「哪檔正在爆量」「盤中異動」「現在誰在被買」 | `scripts/flow_surge.py` | 短窗量比：最近 15 分鐘量 ÷ 20 日同時段均量，掃族群清單全部標的 |
 | 想看族群近幾日輪動 | `flow_eod.py --history 5` | 需要每天跑過一次才有快取 |
-| 使用者要加／改族群 | 編輯 `assets/groups.yaml` | 純數字代號；同一檔可屬多族群 |
+| 「清單外有什麼在動」 | `flow_surge.py --universe market` | 加掃全市場昨日成交值 ≥ `--min-turnover`（預設 50 百萬）的普通股 |
+| 使用者要加／改族群 | 編輯 `assets/groups.yaml` | 純數字代號；同一檔可屬多族群；**用題材分，不用官方產業別** |
+| 清單外個股要標題材 | `scripts/themes_sync.py`（每月一次，約 6–8 分鐘） | MoneyDJ 細產業約 1,000 個題材 → `~/.cache/stock-toolbox/flow/themes_moneydj.json` |
 | 想用官方產業別 | 先跑 `scripts/groups_sync.py`，再加 `--industry` | 每季同步一次即可 |
 
 先用 `user_time_v0`／系統時間判斷是否在交易時段，再選腳本；非交易時段跑盤中腳本會拿到最後一筆快照，要標明時間。
