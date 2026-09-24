@@ -24,21 +24,21 @@ CACHE.mkdir(parents=True, exist_ok=True)
 UA = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 
-def _skill(name: str) -> Path:
+def _skill(name: str, sub: str = "scripts") -> Path:
     for base in (os.environ.get("STOCK_TOOLBOX"), HERE.parent.parent, Path.home() / ".claude" / "skills"):
-        if base and (Path(base) / name / "scripts").exists():
-            return Path(base) / name / "scripts"
+        if base and (Path(base) / name / sub).exists():
+            return Path(base) / name / sub
     raise SystemExit(f"找不到 {name} skill；請設定 STOCK_TOOLBOX")
 
 
 def ohlcv(code: str, period: str = "1y") -> pd.DataFrame:
-    """日線（借 stock-ta 的資料層：自動 .TW/.TWO、快取、剔除 NaN 棒）。"""
-    d = str(_skill("stock-ta"))
+    """日線（stock-common 共用資料層：自動 .TW/.TWO、快取、剔除 NaN 棒）。"""
+    d = str(_skill("stock-common", sub=""))
     if d not in sys.path:
         sys.path.insert(0, d)
     import logging
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-    from data import fetch_ohlcv  # noqa: E402
+    from stockdata import fetch_ohlcv  # noqa: E402
     return fetch_ohlcv(code, period)[0]
 
 

@@ -86,20 +86,20 @@ def sync(force=False):
     print(f"[sync] {'ok → ' + dest if r.returncode == 0 else '失敗: ' + r.stderr.strip()[-200:]}")
 
 
-# ---------------------------------------------------------------- price lookup（借 stock-ta 的資料層）
-def _ta_dir() -> Path | None:
+# ---------------------------------------------------------------- price lookup（stock-common 共用資料層）
+def _common_dir() -> Path | None:
     for base in (os.environ.get("STOCK_TOOLBOX"), HERE.parent.parent, Path.home() / ".claude" / "skills"):
-        if base and (Path(base) / "stock-ta" / "scripts" / "data.py").exists():
-            return Path(base) / "stock-ta" / "scripts"
+        if base and (Path(base) / "stock-common" / "stockdata.py").exists():
+            return Path(base) / "stock-common"
     return None
 
 
 def prices(codes: list[str]) -> dict[str, dict]:
-    d = _ta_dir()
+    d = _common_dir()
     if not d:
-        print("[warn] 找不到 stock-ta，無法自動取價"); return {}
-    sys.path.insert(0, str(d))
-    from data import fetch_ohlcv  # noqa
+        print("[warn] 找不到 stock-common，無法自動取價"); return {}
+    if str(d) not in sys.path: sys.path.insert(0, str(d))
+    from stockdata import fetch_ohlcv  # noqa
     out = {}
     for c in codes:
         try:

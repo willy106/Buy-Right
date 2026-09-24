@@ -8,7 +8,10 @@
 import argparse
 from datetime import date, timedelta
 import pandas as pd
-from data import fetch_ohlcv, finmind, normalize, tw_code, dump
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stock-common"))   # 共用資料層
+from stockdata import fetch_ohlcv, finmind, normalize, tw_code, dump
 from indicators import enrich, mpf_style, pivots, cluster_levels, volume_profile, forward_return_stats, gaps
 from ta_quick import snapshot
 

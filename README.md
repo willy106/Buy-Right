@@ -10,6 +10,7 @@
 | `stock-fa` | 基本面：月營收、8 季財報、本益比河流圖、同業比較 |
 | `stock-risk` | 風控：大盤環境（多頭／震盪／空頭）、部位大小（1R）、移動停利 |
 | `stock-journal` | 交易日誌：進場論點與證偽條件、每日檢查、檢討統計，rclone 同步 Google Drive |
+| `stock-common` | 共用資料層（非 skill）：行情、FinMind、快取，上面各 skill 共用 |
 
 ## 安裝
 1. 放到 `~/.claude/skills/`（或設 `STOCK_TOOLBOX` 指向此目錄）。
