@@ -23,3 +23,8 @@
 4. 選用：`FINMIND_TOKEN`（FinMind 免費註冊，300 → 600 次/小時）。
 
 資料來源全部免費：證交所／櫃買 OpenAPI 與 mis 即時報價、yfinance、FinMind 免費層。本工具只做紀錄與分析，不下單、不構成投資建議。
+
+## 測試
+```bash
+python -m unittest discover -s stock-journal/tests -v   # 不連網、不碰 ~/stock-journal
+```
