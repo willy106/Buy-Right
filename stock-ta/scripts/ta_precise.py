@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""精準技術面（單支，含週線、支撐壓力、籌碼密集區、台股法人／融資、訊號歷史勝率）。
+"""精準技術面（單支，含週線、支撐壓力、未回補缺口、籌碼密集區、台股法人／融資、訊號歷史勝率）。
 
 用法:
   python ta_precise.py 2330 --out ./2330_ta          # 產生 2330_ta.json / 2330_ta.png / 2330_ta_weekly.png
@@ -9,7 +9,7 @@ import argparse
 from datetime import date, timedelta
 import pandas as pd
 from data import fetch_ohlcv, finmind, normalize, tw_code, dump
-from indicators import enrich, mpf_style, pivots, cluster_levels, volume_profile, forward_return_stats
+from indicators import enrich, mpf_style, pivots, cluster_levels, volume_profile, forward_return_stats, gaps
 from ta_quick import snapshot
 
 
@@ -59,7 +59,7 @@ def tw_chips(code: str, days: int = 60) -> dict:
     return out
 
 
-def annotated_chart(df: pd.DataFrame, symbol: str, path: str, sr: dict, bars=180, title="daily"):
+def annotated_chart(df: pd.DataFrame, symbol: str, path: str, sr: dict, bars=180, title="daily", gp: dict | None = None):
     import mplfinance as mpf
     d = enrich(df).tail(bars)
     lines = [z["level"] for z in sr["support"] + sr["resistance"]]
@@ -68,6 +68,11 @@ def annotated_chart(df: pd.DataFrame, symbol: str, path: str, sr: dict, bars=180
            mpf.make_addplot(d["K"], panel=2, ylabel="KD"), mpf.make_addplot(d["D"], panel=2),
            mpf.make_addplot(d["MACD_hist"], panel=3, type="bar", ylabel="MACD")]
     kw = dict(hlines=dict(hlines=lines, colors=colors, linestyle="-.", linewidths=0.8)) if lines else {}
+    fills = [dict(y1=g["unfilled"][0], y2=g["unfilled"][1], where=(d.index >= pd.Timestamp(g["date"]).tz_localize(d.index.tz)),
+                  alpha=0.25, color="g" if k == "support" else "r")
+             for k in ("support", "resistance") for g in (gp or {}).get(k, [])
+             if pd.Timestamp(g["date"]).tz_localize(d.index.tz) >= d.index[0]]   # 缺口區：從缺口日起塗色
+    if fills: kw["fill_between"] = fills
     mpf.plot(d, type="candle", style=mpf_style(symbol), volume=True, addplot=aps, panel_ratios=(4, 1, 1, 1),
              title=f"{symbol}  {title}", savefig=path, figsize=(13, 10), **kw)
     print(f"[chart] {path}")
@@ -79,6 +84,7 @@ if __name__ == "__main__":
     ap.add_argument("--period", default="2y")
     ap.add_argument("--out", required=True, help="輸出檔名前綴，例如 ./2330_ta")
     ap.add_argument("--drop-today", action="store_true")
+    ap.add_argument("--gap-lookback", type=int, default=60, help="缺口偵測回看 K 線數（預設 60）")
     a = ap.parse_args()
 
     df, sym = fetch_ohlcv(a.ticker, a.period, drop_today=a.drop_today)
@@ -86,11 +92,13 @@ if __name__ == "__main__":
     d = enrich(df)
     close = float(d["Close"].iloc[-1])
     sr = sr_levels(df, close)
+    gp = gaps(df, close, lookback=a.gap_lookback)
 
     report = {
         "daily": snapshot(df, sym),
         "weekly": ({k.replace("_1d", "_1w").replace("_5d", "_5w").replace("_20d", "_20w").replace("52w", "5y"): v for k, v in snapshot(wk, sym).items()} if len(wk) > 30 else None),
         "support_resistance": sr,
+        "gaps_unfilled": {"lookback_bars": a.gap_lookback, **gp},
         "volume_profile_top5": volume_profile(df.tail(250)),
         "signal_history": signal_stats(d),
         "volatility": {"ATR14_pct": round(float(d["ATR14"].iloc[-1] / close * 100), 2),
@@ -111,7 +119,7 @@ if __name__ == "__main__":
     if mkt == "TW":
         report["tw_chips"] = tw_chips(tw_code(sym))
 
-    annotated_chart(df, sym, a.out + ".png", sr)
+    annotated_chart(df, sym, a.out + ".png", sr, gp=gp)
     if len(wk) > 30:
         annotated_chart(wk, sym, a.out + "_weekly.png", {"support": [], "resistance": []}, bars=120, title="weekly")
     dump(report, a.out + ".json")
