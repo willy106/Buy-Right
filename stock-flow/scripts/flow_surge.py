@@ -13,6 +13,7 @@
   python flow_surge.py 2330 3017 --top 15  # 額外加幾檔
   python flow_surge.py --watch --interval 60   # 盤中取樣器：每 60 秒存一筆快照，13:30 自動結束
   python flow_surge.py --json /tmp/surge.json
+  python flow_surge.py --universe market   # 再加全市場流動性個股（昨日成交值 ≥ --min-turnover 百萬），找清單外的異動
 
 欄位：win_min 實際窗口分鐘、win_lots 窗口成交張數、ratio 短窗量比、ret_pct 窗口內漲跌%、
       src = snap（即時快照）或 yf（延遲）、label = 爆量/放量 + 流入/流出/價平
@@ -22,7 +23,7 @@ import argparse, json, logging, time
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
-from flowlib import load_groups, all_codes, market_map, realtime_quotes, CACHE
+from flowlib import load_groups, all_codes, market_map, market_universe, realtime_quotes, CACHE
 
 SLOT = 5  # 分鐘
 AUCTION = "13:30*"  # 收盤集合競價（13:30 一次撮合）的虛擬時段
@@ -215,9 +216,18 @@ def main():
     ap.add_argument("--min-lots", type=int, default=50, help="排行只列窗口成交 ≥ 此張數（濾掉冷門股雜訊）")
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--watch", action="store_true"); ap.add_argument("--interval", type=int, default=60)
+    ap.add_argument("--universe", choices=["groups", "market"], default="groups",
+                    help="groups = 族群清單＋指定代號；market = 再加全市場普通股中昨日成交值 ≥ --min-turnover 者")
+    ap.add_argument("--min-turnover", type=float, default=50, help="--universe market 的成交值門檻（百萬元）")
     ap.add_argument("--json")
     a = ap.parse_args()
-    codes = sorted(set(all_codes(load_groups())) | {str(c).zfill(4) for c in a.codes})
+    codes = set(all_codes(load_groups())) | {str(c).zfill(4) for c in a.codes}
+    if a.universe == "market":
+        mu = market_universe(a.min_turnover)
+        if not mu:
+            print("[warn] 沒有盤後快取，無法擴大到全市場（先跑一次 flow_eod.py）")
+        codes |= set(mu)
+    codes = sorted(codes)
     while True:
         now = datetime.now()
         out, _ = compute(codes, a.window, a.warm, a.hot, a.min_ret, now)
@@ -228,7 +238,7 @@ def main():
             print(f"\n[{now:%H:%M:%S}] 短窗量比 TOP {a.top}（窗口 {a.window} 分；src=yf 表示延遲資料）")
             print(top[["code", "name", "chg_pct", "src", "win_min", "win_lots", "exp_lots", "ratio", "ret_pct", "label"]].to_string(index=False))
             if a.json:
-                json.dump({"time": now.isoformat(timespec="seconds"), "window": a.window, "rows": out.to_dict("records")},
+                json.dump({"time": now.isoformat(timespec="seconds"), "window": a.window, "universe": a.universe, "n_codes": len(codes), "rows": out.to_dict("records")},
                           open(a.json, "w"), ensure_ascii=False, indent=2, default=str)
         if not a.watch or now.time() >= datetime.strptime("13:31", "%H:%M").time():
             break

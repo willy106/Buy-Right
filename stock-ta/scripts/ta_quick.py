@@ -9,7 +9,10 @@
 """
 import argparse
 import pandas as pd
-from data import fetch_ohlcv, dump
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stock-common"))   # 共用資料層
+from stockdata import fetch_ohlcv, dump
 from indicators import enrich, mpf_style
 
 

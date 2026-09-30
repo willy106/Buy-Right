@@ -6,6 +6,7 @@
 from __future__ import annotations
 import json, os, re, time
 from pathlib import Path
+import numpy as np
 import pandas as pd
 import requests
 import yaml
@@ -42,11 +43,42 @@ def all_codes(groups: dict) -> list[str]:
     return sorted({c for v in groups.values() for c in v})
 
 
+def theme_map() -> tuple[dict[str, list[str]], dict[str, int], int | None]:
+    """MoneyDJ 細題材（themes_sync.py 產生）。回傳 (代號 → 題材清單，小題材在前), 題材 → 檔數, 資料天數；沒檔案回傳空。"""
+    p = CACHE / "themes_moneydj.json"
+    if not p.exists():
+        return {}, {}, None
+    js = json.loads(p.read_text())
+    size = {k: len(v["codes"]) for k, v in js["themes"].items()}
+    m: dict[str, list[str]] = {}
+    for k in sorted(size, key=size.get):
+        for c in js["themes"][k]["codes"]:
+            m.setdefault(c, []).append(k)
+    age = (pd.Timestamp.now() - pd.Timestamp(js["updated"])).days
+    return m, size, age
+
+
+def market_universe(min_turnover_m: float = 50.0) -> list[str]:
+    """全市場普通股（4 碼、非 0 開頭，排除 ETF／權證）中，最近一份盤後快取成交值 ≥ min_turnover_m 百萬的代號。
+       用來把掃描範圍擴大到族群清單以外；沒有盤後快取時回傳空（先跑一次 flow_eod.py）。"""
+    files = sorted(CACHE.glob("eod_2*.csv"))
+    if not files:
+        return []
+    d = pd.read_csv(files[-1], dtype={"code": str})
+    return sorted(d[d.code.str.fullmatch(r"[1-9]\d{3}") & (d.turnover_M >= min_turnover_m)].code)
+
+
 # ---------------------------------------------------------------- 上市/上櫃判定（快取 30 天）
 def market_map(codes: list[str]) -> dict[str, str]:
     p = CACHE / "market_map.json"
     m = json.loads(p.read_text()) if p.exists() and time.time() - p.stat().st_mtime < 30 * 86400 else {}
     missing = [c for c in codes if c not in m]
+    if missing:   # 先用最近一份盤後快取的 mkt 欄（twse/tpex）補，OpenAPI 常斷線
+        files = sorted(CACHE.glob("eod_2*.csv"))
+        if files:
+            e = pd.read_csv(files[-1], dtype={"code": str}, usecols=["code", "mkt"]).set_index("code")["mkt"].to_dict()
+            m.update({c: {"twse": "tse", "tpex": "otc"}[e[c]] for c in missing if e.get(c) in ("twse", "tpex")})
+            missing = [c for c in codes if c not in m]
     if missing:
         tse, otc = set(), set()
         try:
@@ -59,8 +91,7 @@ def market_map(codes: list[str]) -> dict[str, str]:
             print(f"[warn] TPEx 清單: {e}")
         for c in missing:
             m[c] = "tse" if c in tse else "otc" if c in otc else "unknown"
-        if tse or otc:
-            p.write_text(json.dumps({k: v for k, v in m.items() if v != "unknown"}))
+    p.write_text(json.dumps({k: v for k, v in m.items() if v != "unknown"}))
     return {c: m[c] for c in codes}
 
 
@@ -81,22 +112,37 @@ def realtime_quotes(codes: list[str], mkt: dict[str, str], batch=90, pause=3.0) 
         except Exception as e:
             print(f"[warn] realtime batch {i}: {e}"); continue
         for r in js.get("msgArray", []):
+            if not r.get("c"):   # 上市/上櫃都查時，查不到的那邊會回空殼
+                continue
             def f(k):
                 v = r.get(k, "-")
                 try: return float(v) if v not in ("-", "", None) else None
                 except ValueError: return None
-            ask = r.get("a", "").split("_")[0]; bid = r.get("b", "").split("_")[0]
+            def best(k):
+                # 五檔以 "_" 分隔；第一檔可能是 0.0000（市價單），取第一個正價
+                for p in r.get(k, "").split("_"):
+                    try:
+                        if float(p) > 0: return float(p)
+                    except ValueError:
+                        pass
+                return None
             rows.append({"code": r.get("c"), "name": r.get("n"), "last": f("z"), "prev": f("y"), "open": f("o"),
                          "high": f("h"), "low": f("l"), "vol_lots": f("v"), "tick_vol": f("tv"),
-                         "ask": float(ask) if ask not in ("", "-") else None, "bid": float(bid) if bid not in ("", "-") else None,
+                         "ask": best("a"), "bid": best("b"), "limit_up": f("u"), "limit_dn": f("w"),
                          "time": r.get("t")})
         if i + batch < len(codes):
             time.sleep(pause)
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    # 盤中未成交時 z 為 '-'，退回用 (bid+ask)/2 或昨收
-    df["last"] = df["last"].fillna((df["bid"] + df["ask"]) / 2).fillna(df["prev"])
+    # 盤中未成交時 z 為 '-'。漲停鎖死（無賣單、買一＝漲停價）／跌停鎖死（無買單、賣一＝跌停價）
+    # 時 (bid+ask)/2 算不出來，舊寫法會退回昨收、把漲跌停股誤判成 0%，這裡先補上漲跌停價。
+    lu = df["last"].isna() & df["ask"].isna() & df["bid"].notna() & (df["bid"] >= df["limit_up"])
+    ld = df["last"].isna() & df["bid"].isna() & df["ask"].notna() & (df["ask"] <= df["limit_dn"])
+    df.loc[lu, "last"] = df.loc[lu, "limit_up"]
+    df.loc[ld, "last"] = df.loc[ld, "limit_dn"]
+    # 其餘：(bid+ask)/2 → 單邊報價 → 昨收
+    df["last"] = df["last"].fillna((df["bid"] + df["ask"]) / 2).fillna(df["bid"]).fillna(df["ask"]).fillna(df["prev"])
     df["chg_pct"] = (df["last"] / df["prev"] - 1) * 100
     # 成交金額估計：VWAP 用 (o+h+l+last)/4 近似，誤差通常 <2%
     vwap = df[["open", "high", "low", "last"]].mean(axis=1).fillna(df["last"])
@@ -164,6 +210,66 @@ def _twse_mi_index(d8: str) -> list[dict]:
     return out
 
 
+def _tpex_date(d8: str) -> str:
+    return f"{d8[:4]}/{d8[4:6]}/{d8[6:]}"
+
+
+def _tpex_quotes(d8: str) -> list[dict]:
+    """上櫃指定日收盤行情（www.tpex.org.tw afterTrading/dailyQuotes，可查歷史；OpenAPI 只給最新一日）。
+       成交金額與 OpenAPI 一致（含盤後定價等；afterTrading/otc 只有一般交易時段，會少約 5%）。"""
+    js = get_json("https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes",
+                  params={"date": _tpex_date(d8), "id": "", "response": "json"})
+    if js.get("stat") != "ok" or js.get("date") != d8 or not js.get("tables"):
+        return []
+    tbl = js["tables"][0]
+    f = {k.strip(): i for i, k in enumerate(tbl["fields"])}
+    out = []
+    for row in tbl.get("data", []):
+        try:
+            out.append({"code": row[f["代號"]].strip(), "name": row[f["名稱"]].strip(),
+                        "close": float(row[f["收盤"]].replace(",", "")), "chg": _num(row[f["漲跌"]]),
+                        "turnover_M": _num(row[f["成交金額(元)"]]) / 1e6, "date": d8, "mkt": "tpex"})
+        except (ValueError, KeyError):
+            pass  # 無成交（收盤價 "----"）
+    return out
+
+
+def _tpex_insti(d8: str) -> list[dict]:
+    """上櫃指定日三大法人（insti/dailyTrade，可查歷史）。欄位每 3 欄一組：外資(不含自營)、外資自營、外資合計、
+       投信、自營自行、自營避險、自營合計，最後一欄三大合計；取各組的「買賣超股數」。"""
+    js = get_json("https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade",
+                  params={"type": "Daily", "sect": "EW", "date": _tpex_date(d8), "response": "json"})
+    if js.get("stat") != "ok" or js.get("date") != d8 or not js.get("tables"):
+        return []
+    out = []
+    for row in js["tables"][0].get("data", []):
+        if len(row) < 24:
+            continue
+        out.append({"code": row[0].strip(), "foreign_lots": _num(row[10]) / 1000,
+                    "trust_lots": _num(row[13]) / 1000, "dealer_lots": _num(row[22]) / 1000})
+    return out
+
+
+def eod_prices_on(d8: str) -> pd.DataFrame:
+    """指定交易日的全市場收盤（上市 MI_INDEX + 上櫃 afterTrading/dailyQuotes），欄位同 eod_prices()。
+       休市日兩邊都回空；只有一邊有資料時 attrs["market_dates"] 會標出缺哪邊，呼叫端用 eod_problems() 檢查。"""
+    twse, tpex = [], []
+    try:
+        twse = _twse_mi_index(d8)
+    except Exception as e:
+        print(f"[warn] TWSE MI_INDEX {d8}: {e}")
+    try:
+        tpex = _tpex_quotes(d8)
+    except Exception as e:
+        print(f"[warn] TPEx dailyQuotes {d8}: {e}")
+    df = pd.DataFrame(twse + tpex)
+    if len(df):
+        df["chg_pct"] = df["chg"] / (df["close"] - df["chg"]) * 100
+    df.attrs["market_dates"] = {"twse": d8 if twse else None, "tpex": d8 if tpex else None}
+    df.attrs["target"] = d8
+    return df
+
+
 def eod_prices(expect: str | None = None) -> pd.DataFrame:
     """全市場最近一個交易日收盤：code, name, close, chg_pct, turnover_M, date, mkt（上市 + 上櫃）
        date 為資料本身的交易日（YYYYMMDD），盤中呼叫時會是前一交易日。
@@ -196,6 +302,10 @@ def eod_prices(expect: str | None = None) -> pd.DataFrame:
         s = pd.Series([r["date"] for r in rows]).dropna()
         return s.mode().iloc[0] if len(s) else None
     target = expect or max(filter(None, [mdate(twse), mdate(tpex)]), default=None)
+    now = pd.Timestamp.now(tz="Asia/Taipei")
+    today = now.strftime("%Y%m%d")
+    if not expect and target != today and now.weekday() < 5 and now.hour * 60 + now.minute >= 14 * 60 + 30:
+        target = today   # 兩個 OpenAPI 都落後（或上櫃斷線）時，仍試抓今天的 MI_INDEX；休市日 MI_INDEX 回空，會退回原目標日
     if target and mdate(twse) != target:
         try:
             alt = _twse_mi_index(target)
@@ -204,6 +314,8 @@ def eod_prices(expect: str | None = None) -> pd.DataFrame:
         if alt:
             print(f"[info] 上市 OpenAPI 資料日 {mdate(twse)} ≠ {target}，改用 MI_INDEX {target}")
             twse = alt
+        elif target == today and not expect:
+            target = max(filter(None, [mdate(twse), mdate(tpex)]), default=None)
     df = pd.DataFrame(twse + tpex)
     if len(df):
         df["chg_pct"] = df["chg"] / (df["close"] - df["chg"]) * 100
@@ -263,10 +375,15 @@ def eod_institutional(date_str: str | None = None) -> pd.DataFrame:
                          "foreign_lots": _num(n.get("foreigninvestorsincludemainlandareainvestorsdifference")) / 1000,
                          "trust_lots": _num(n.get("securitiesinvestmenttrustcompaniesdifference")) / 1000,
                          "dealer_lots": _num(n.get("dealersdifference")) / 1000})
-        if not tpex:
-            print(f"[warn] TPEx 3insti：無 {d8} 資料")
     except Exception as e:
         print(f"[warn] TPEx 3insti: {e}")
+    if not tpex:  # OpenAPI 只給最新一日；查歷史或 OpenAPI 還沒更新時改用可指定日期的 dailyTrade
+        try:
+            tpex = _tpex_insti(d8)
+        except Exception as e:
+            print(f"[warn] TPEx dailyTrade {d8}: {e}")
+        if not tpex:
+            print(f"[warn] TPEx 3insti：無 {d8} 資料")
     alive = lambda rows: rows and any(r["foreign_lots"] or r["trust_lots"] or r["dealer_lots"] for r in rows)
     if not alive(twse) or not alive(tpex):  # FinMind 備援（整市場單日），只補缺的市場
         d = f"{d8[:4]}-{d8[4:6]}-{d8[6:]}"
@@ -300,3 +417,86 @@ def data_date(px: pd.DataFrame) -> str:
 
 def snapshot_path(tag: str, date: str | None = None) -> Path:
     return CACHE / f"{tag}_{date or f'{pd.Timestamp.today():%Y%m%d}'}.csv"
+
+
+# ---------------------------------------------------------------- 多週期族群流向
+def inst_path(date: str) -> Path:
+    """個股三大法人快取（張數），多週期流向用現行族群清單重算，所以存個股而不是族群加總。"""
+    return CACHE / f"eod_inst_{date}.csv"
+
+
+def cached_eod_dates(upto: str | None = None) -> list[str]:
+    """有收盤快取（eod_YYYYMMDD.csv）的交易日，由舊到新；upto 之後的不算。"""
+    ds = sorted(f.stem[4:] for f in CACHE.glob("eod_[0-9]*.csv") if len(f.stem) == 12)
+    return [d for d in ds if not upto or d <= upto]
+
+
+def _flow_label(share: float, inst: float) -> str:
+    if pd.isna(share) or pd.isna(inst):
+        return "-"
+    if share > 0 and inst > 0:
+        return "流入"
+    if share < 0 and inst < 0:
+        return "流出"
+    return "佔比↑法人賣" if share > 0 else "佔比↓法人買"
+
+
+def group_windows(groups: dict[str, list[str]], windows=(3, 5, 10, 20), base: int = 20,
+                  upto: str | None = None, min_base: int = 5) -> pd.DataFrame:
+    """族群 N 日資金流向（只讀盤後快取；缺的日子先跑 flow_backfill.py 補）。
+       share_Nd = 近 N 日平均成交佔比 − 再往前 base 日的平均佔比（百分點）；前段不足 min_base 日 → NaN
+       inst_Nd  = 近 N 日三大法人淨額合計（百萬）；N 日內有任一天缺法人資料 → NaN
+       flow_Nd  = 流入（佔比↑且法人買）／流出（佔比↓且法人賣）／佔比↑法人賣／佔比↓法人買
+       attrs：upto（最後一天）、days（可用天數）"""
+    dates = cached_eod_dates(upto)
+    need = max(windows) + base
+    dates = dates[-need:]
+    share = {g: {} for g in groups}
+    inst = {g: {} for g in groups}
+    for d in dates:
+        px = pd.read_csv(CACHE / f"eod_{d}.csv", dtype={"code": str})
+        tot = px["turnover_M"].sum()
+        ip = inst_path(d)
+        il = pd.read_csv(ip, dtype={"code": str}) if ip.exists() else None
+        if il is not None:
+            il = il.merge(px[["code", "close"]], on="code", how="left")
+            il["inst_M"] = (il[["foreign_lots", "trust_lots", "dealer_lots"]].sum(axis=1) * il["close"] * 1000 / 1e6)
+        gp = CACHE / f"eod_groups_{d}.csv"
+        gfile = pd.read_csv(gp).set_index("group")["inst_M"] if il is None and gp.exists() else None
+        for g, codes in groups.items():
+            if tot:
+                share[g][d] = px.loc[px.code.isin(codes), "turnover_M"].sum() / tot * 100
+            if il is not None:
+                inst[g][d] = il.loc[il.code.isin(codes), "inst_M"].sum()
+            elif gfile is not None and g in gfile.index:
+                inst[g][d] = float(gfile[g])
+    rows = []
+    for g in groups:
+        s = pd.Series(share[g], dtype=float).reindex(dates)
+        i = pd.Series(inst[g], dtype=float).reindex(dates)
+        r = {"group": g}
+        for n in windows:
+            if len(dates) < n:
+                sc = ic = np.nan
+            else:
+                prior = s.iloc[max(0, len(dates) - n - base):len(dates) - n].dropna()
+                sc = s.iloc[-n:].mean() - prior.mean() if len(prior) >= min_base else np.nan
+                ic = i.iloc[-n:].sum(min_count=n) if i.iloc[-n:].notna().all() else np.nan
+            r[f"share_{n}d"] = round(sc, 2) if pd.notna(sc) else np.nan
+            r[f"inst_{n}d"] = round(ic) if pd.notna(ic) else np.nan
+            r[f"flow_{n}d"] = _flow_label(sc, ic)
+        rows.append(r)
+    out = pd.DataFrame(rows)
+    out.attrs["upto"] = dates[-1] if dates else None
+    out.attrs["days"] = len(dates)
+    return out
+
+
+def windows_cell(r: dict | pd.Series, n: int) -> str:
+    """報告用的一格：佔比變化｜法人淨額 標籤，例如「+0.42｜+1,230M 流入」。"""
+    s, i, lab = r.get(f"share_{n}d"), r.get(f"inst_{n}d"), r.get(f"flow_{n}d", "-")
+    if pd.isna(s) and pd.isna(i):
+        return "資料不足"
+    ss = f"{s:+.2f}" if pd.notna(s) else "?"
+    ii = f"{i:+,.0f}M" if pd.notna(i) else "?"
+    return f"{ss}｜{ii} {lab}"

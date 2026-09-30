@@ -13,7 +13,10 @@ description: 台股盤中／盤後「族群資金流向」工具（免費即時�
 | 13:30 後或問「今天法人」「收盤後」 | `scripts/flow_eod.py` | 法人資料約 15:30 上市、16:00 上櫃後才齊 |
 | 「哪檔正在爆量」「盤中異動」「現在誰在被買」 | `scripts/flow_surge.py` | 短窗量比：最近 15 分鐘量 ÷ 20 日同時段均量，掃族群清單全部標的 |
 | 想看族群近幾日輪動 | `flow_eod.py --history 5` | 需要每天跑過一次才有快取 |
-| 使用者要加／改族群 | 編輯 `assets/groups.yaml` | 純數字代號；同一檔可屬多族群 |
+| 多週期流向（3／5／10／20 日） | `flow_eod.py` 預設就印；快取不足先跑 `scripts/flow_backfill.py` | 回補最近 40 個交易日約 8–10 分鐘，可背景跑；之後每天 `flow_eod.py` 會自動累積 |
+| 「清單外有什麼在動」 | `flow_surge.py --universe market` | 加掃全市場昨日成交值 ≥ `--min-turnover`（預設 50 百萬）的普通股 |
+| 使用者要加／改族群 | 編輯 `assets/groups.yaml` | 純數字代號；同一檔可屬多族群；**用題材分，不用官方產業別** |
+| 清單外個股要標題材 | `scripts/themes_sync.py`（每月一次，約 6–8 分鐘） | MoneyDJ 細產業約 1,000 個題材 → `~/.cache/stock-toolbox/flow/themes_moneydj.json` |
 | 想用官方產業別 | 先跑 `scripts/groups_sync.py`，再加 `--industry` | 每季同步一次即可 |
 
 先用 `user_time_v0`／系統時間判斷是否在交易時段，再選腳本；非交易時段跑盤中腳本會拿到最後一筆快照，要標明時間。
@@ -24,6 +27,7 @@ python <skill_dir>/scripts/flow_intraday.py --top 6 --json /tmp/flow.json
 python <skill_dir>/scripts/flow_intraday.py --watch --interval 90        # 使用者要持續看時
 python <skill_dir>/scripts/flow_eod.py --chart /tmp/flow_eod.png --json /tmp/flow_eod.json
 python <skill_dir>/scripts/flow_eod.py --history 5
+python <skill_dir>/scripts/flow_backfill.py --days 40 --windows            # 回補歷史盤後快取＋印多週期流向
 python <skill_dir>/scripts/flow_surge.py --top 10 --json /tmp/surge.json      # 盤中異動
 python <skill_dir>/scripts/flow_surge.py --watch --interval 60                # 盤中取樣器（每分鐘存快照）
 ```
@@ -35,6 +39,7 @@ python <skill_dir>/scripts/flow_surge.py --watch --interval 60                # 
 - 任一市場法人資料缺（例：TPEx 3insti 斷線且 FinMind 也沒有）→ `[warn] …法人資料缺`，照常輸出但**不寫族群快取**；此時族群法人數字不完整，不要當【事實】引用，請稍後重跑。
 - 快取保護：新資料筆數 < 同日既有快取 90% 時不覆蓋。OpenAPI 請求遇斷線會自動重試 3 次。
 - `--history` 只讀快取，當日資料抓不到時仍會顯示。
+- 多週期流向讀 `eod_YYYYMMDD.csv`（收盤）與 `eod_inst_YYYYMMDD.csv`（個股法人）；舊日子沒有個股法人快取時退回 `eod_groups_*.csv`（當時的族群清單）。回補用上市 MI_INDEX／T86 與上櫃 afterTrading/dailyQuotes／insti/dailyTrade，兩市場任一缺就不寫。
 
 ## 解讀規則
 1. **資金流向 ≠ 漲幅**。判斷「流入」看 `share_vs_5d`（成交值佔比相對近 5 日）為正，且 `avg_chg` 為正、`up > down`；只有漲幅沒有佔比上升，寫「跟漲」不寫「資金流入」。
@@ -44,13 +49,15 @@ python <skill_dir>/scripts/flow_surge.py --watch --interval 60                # 
 5. 族群內若只有 1–2 檔貢獻了大部分成交值（看 `leaders`），要說是「個股行情」而非族群行情。
 6. 族群清單是人工維護，同一檔會跨族群（例如 3037 同時在 PCB 與載板），比較族群時要提醒重疊。
 7. 不做左側建議；流出族群只描述，不說「可以逢低承接」。
-8. `flow_surge` 的 `src=yf~HH:MM` 是延遲約 20 分的資料（當天首次執行、無 N 分鐘前快照時的退路），要講明時間；`src=snap` 才是即時。同族群多檔爆量流入才叫族群行情。
+8. **回報族群流入／流出時，一律同時講 3、5、10、20 日的流向**（`group_windows`：每格＝成交佔比變化 pp｜N 日法人淨額｜判定）。判定：佔比↑且法人買＝流入、兩者皆↓＝流出，其餘寫出是哪邊背離（佔比↑法人賣＝散戶追價、佔比↓法人買＝法人低調承接）。短週期流入但 20 日流出＝反彈／輪動初期；各週期一致流入才叫「持續流入」。某週期顯示「資料不足」就照講，不要自己補數字。
+9. `flow_surge` 的 `src=yf~HH:MM` 是延遲約 20 分的資料（當天首次執行、無 N 分鐘前快照時的退路），要講明時間；`src=snap` 才是即時。同族群多檔爆量流入才叫族群行情。
 
 ## 輸出格式
 ```
 # 族群資金流向 <日期 時間>（盤中｜盤後）  大盤成交值 xxxx 億
 ## 流入 TOP N   表：族群｜佔比%｜vs 5日｜平均漲幅｜漲/跌｜（盤後：外資/投信/合計 M）｜領漲或法人買最多
 ## 流出 TOP N
+## 多週期流向   表：族群｜3日｜5日｜10日｜20日（每格：佔比變化 pp｜法人淨額 M 判定）
 ## 觀察（3–5 點）  哪些是真流入、哪些是個股行情、法人與價格是否同向、與前幾日相比的輪動
 ```
 盤後附堆疊長條圖（外資／投信／自營）。

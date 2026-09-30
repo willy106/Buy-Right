@@ -60,6 +60,35 @@ def load_journal() -> dict[str, dict]:
     return {}
 
 
+def live_defense(j, cur_p) -> tuple[float | None, str]:
+    """持倉當下防守價與標籤。journal 的 falsify_level 是上次 check（前一交易日）算的；
+    動態 MA 證偽要把「現價」當今日收盤重算（與 check 盤後的算法一致），否則會顯示前一天的 MA。
+    回傳 (防守價, 標籤)，取固定證偽價、動態 MA、移動停利三者最高。"""
+    cand = {}
+    if pd.notna(j.get("falsify_price")) and j.get("falsify_price"):
+        cand["證偽價"] = float(j["falsify_price"])
+    n = int(j["falsify_ma"]) if pd.notna(j.get("falsify_ma")) and j.get("falsify_ma") else 0
+    if n and cur_p:
+        try:
+            common = find_skill("stock-ta").parents[1] / "stock-common"
+            if str(common) not in sys.path:
+                sys.path.insert(0, str(common))
+            from stockdata import fetch_ohlcv
+            closes = fetch_ohlcv(str(j["code"]), "6mo", drop_today=True)[0]["Close"]
+            if len(closes) >= n - 1:
+                cand[f"證偽價(MA{n})"] = round((float(closes.tail(n - 1).sum()) + float(cur_p)) / n, 2)
+        except BaseException as e:   # fetch_ohlcv 失敗會 SystemExit
+            print(f"[warn] {j['code']} 動態 MA 重算失敗，改用上次 check 的防守價: {e}")
+    if n and not any(k.startswith("證偽價(MA") for k in cand) and pd.notna(j.get("falsify_level")):
+        cand[f"證偽價(MA{n}，前日)"] = float(j["falsify_level"])
+    if pd.notna(j.get("trail_stop")) and j.get("trail_stop"):
+        cand["移動停利"] = float(j["trail_stop"])
+    if not cand:
+        return None, "證偽價"
+    lab = max(cand, key=cand.get)
+    return round(cand[lab], 2), lab
+
+
 def load_watchlist(extra: list[str]) -> dict[str, list[str]]:
     p = ASSETS / "watchlist.yaml"   # 個人清單（不進 git）；沒有就用範本
     wl = yaml.safe_load((p if p.exists() else ASSETS / "watchlist.example.yaml").read_text(encoding="utf-8")) or {}
@@ -146,7 +175,8 @@ def main():
     # 2b) 短窗量比（盤中）：掃族群清單 ∪ 自選，同時存即時量快照
     sg = pd.DataFrame()
     if mode == "intraday":
-        surge = run_json(flow_dir, "flow_surge.py", codes + ["--window", str(alerts["surge_window_min"]),
+        surge = run_json(flow_dir, "flow_surge.py", codes + ["--universe", alerts.get("surge_universe", "groups"),
+                         "--min-turnover", str(alerts.get("surge_min_turnover_m", 50)), "--window", str(alerts["surge_window_min"]),
                          "--warm", str(alerts["surge_warm"]), "--hot", str(alerts["surge_hot"]), "--min-ret", str(alerts["surge_min_ret_pct"])])
         sg = pd.DataFrame(surge["rows"]) if surge else pd.DataFrame()
     sgd = {r["code"]: r for r in sg.to_dict("records")} if len(sg) else {}
@@ -203,10 +233,8 @@ def main():
             if j is not None:
                 ent = float(j["entry_price"]); cur_p = r["現價"]
                 pnl = f"{(cur_p/ent-1)*100:+.1f}%" if cur_p else "-"
-                # 防守價：journal check 算好的 falsify_level（固定價、動態 MA、移動停利取最高），沒有才退回 falsify_price
-                fp = j.get("falsify_level") if pd.notna(j.get("falsify_level")) else j.get("falsify_price")
-                ts = j.get("trail_stop")
-                lab = "移動停利" if pd.notna(ts) and pd.notna(fp) and float(ts) >= float(fp) else "證偽價"
+                # 防守價：固定證偽價、動態 MA（以現價當今日收盤重算）、移動停利取最高
+                fp, lab = live_defense(j, cur_p)
                 near = ""
                 if pd.notna(fp) and fp and cur_p:
                     gap = (cur_p / float(fp) - 1) * 100
@@ -267,18 +295,72 @@ def main():
                     else ["group", "share_pct", "share_vs_5d", "avg_chg", "up", "down", "leaders"])
         md += ["\n## 族群流入", fg.head(n)[key_cols].to_markdown(index=False),
                "\n## 族群流出", fg.tail(n)[key_cols].iloc[::-1].to_markdown(index=False)]
+    # 族群多週期流向：上面列到的族群 + 持倉所屬族群，3／5／10／20 日（只讀盤後快取，盤中是到前一交易日）
+    wins = tuple(alerts.get("group_windows", [3, 5, 10, 20]))
+    try:
+        gw = flowlib.group_windows(groups, wins)
+    except Exception as e:
+        gw = pd.DataFrame(); print(f"[warn] 多週期族群流向失敗：{e}")
+    if len(gw):
+        shown = (list(fg.head(n).group) + list(fg.tail(n).group[::-1])) if len(fg) else []
+        shown += [g for c in held for g in group_of(c, groups)]
+        shown = [g for g in dict.fromkeys(shown) if g in set(gw.group)]
+        if shown:
+            t = gw.set_index("group").loc[shown].reset_index()
+            tbl = pd.DataFrame({"族群": t["group"], **{f"{w}日": [flowlib.windows_cell(r, w) for r in t.to_dict("records")] for w in wins}})
+            upto = gw.attrs.get("upto")
+            md += [f"\n## 族群多週期流向（至 {upto} 盤後，快取 {gw.attrs.get('days')} 日）",
+                   "每格＝成交佔比變化 pp（近 N 日均 vs 再往前 20 日）｜三大法人 N 日淨額；流入＝佔比↑且法人買，流出＝兩者皆↓。",
+                   tbl.to_markdown(index=False)]
+            if gw.attrs.get("days", 0) < max(wins) + 5:
+                md.append(f"（快取只有 {gw.attrs.get('days')} 日，長週期資料不足：跑 `stock-flow/scripts/flow_backfill.py` 補齊）")
     if len(sg):
         sn = alerts["surge_top_n"]
         top = sg[(sg.win_lots.fillna(0) >= alerts["surge_min_lots"])].sort_values("ratio", ascending=False).head(sn).copy()
         top["win_min"] = top["win_min"].astype("Int64")
-        top["族群"] = ["、".join(group_of(c, groups)) or "-" for c in top.code]
+        known = set(flowlib.all_codes(groups)) | set(codes)
+        tmap, tsize, tage = flowlib.theme_map()
+        def theme_of(c, k=2):   # 清單外個股：MoneyDJ 細題材（小題材在前）
+            return "、".join(tmap.get(c, [])[:k]) or "?"
+        top["族群"] = ["、".join(group_of(c, groups)) or ("自選" if c in codes else f"清單外｜{theme_of(c)}") for c in top.code]
         top = top.rename(columns={"code": "代號", "name": "名稱", "chg_pct": "今日%", "win_min": "窗口分", "win_lots": "窗口張",
                                   "exp_lots": "同時段均張", "ratio": "短窗量比", "ret_pct": "窗口%", "label": "標籤", "src": "來源"})
         delayed = (~sg.src.fillna("").eq("snap")).any()
-        md += [f"\n## 盤中異動（族群清單+自選，短窗量比前 {sn}）",
+        md += [f"\n## 盤中異動（{'全市場' if alerts.get('surge_universe') == 'market' else '族群清單+自選'}，短窗量比前 {sn}）",
                "短窗量比 = 最近 N 分鐘量 ÷ 過去 20 日同時段均量；≥{:g} 放量、≥{:g} 爆量，窗口漲跌決定流入/流出。".format(alerts["surge_warm"], alerts["surge_hot"])
                + ("\n來源 yf~HH:MM = 當天首次執行，用 yfinance 5 分 K（延遲約 20 分，資料到該時間）；15 分鐘後再跑即改用即時快照。" if delayed else ""),
                top[["代號", "名稱", "族群", "今日%", "窗口分", "窗口張", "同時段均張", "短窗量比", "窗口%", "標籤", "來源"]].to_markdown(index=False)]
+        # 清單外異動：不在族群清單／自選／日誌、正在放量或爆量流入的個股，並找同題材聚集
+        out = sg[~sg.code.isin(known) & (sg.win_lots.fillna(0) >= alerts["surge_min_lots"])
+                 & sg.label.fillna("").str.contains("流入")].sort_values("ratio", ascending=False)
+        if alerts.get("surge_universe") == "market":
+            on = alerts.get("outside_top_n", 8)
+            md.append(f"\n## 清單外異動（全市場昨日成交值 ≥{alerts.get('surge_min_turnover_m', 50):g} 百萬、族群清單與自選以外，放量／爆量流入）")
+            if tage is None:
+                md.append("（沒有題材資料：先跑 `stock-flow/scripts/themes_sync.py`）")
+            elif tage > 30:
+                md.append(f"（題材資料已 {tage} 天，建議重跑 `stock-flow/scripts/themes_sync.py`）")
+            if len(out):
+                t = out.head(on).copy()
+                t["題材"] = [theme_of(c, 3) for c in t.code]
+                t["win_min"] = t["win_min"].astype("Int64")
+                md.append(t.rename(columns={"code": "代號", "name": "名稱", "chg_pct": "今日%", "win_min": "窗口分", "win_lots": "窗口張",
+                                            "ratio": "短窗量比", "ret_pct": "窗口%", "label": "標籤", "src": "來源"})
+                          [["代號", "名稱", "題材", "今日%", "窗口分", "窗口張", "短窗量比", "窗口%", "標籤", "來源"]].to_markdown(index=False))
+                # 同題材 ≥ N 檔同時流入 → 可能是清單沒涵蓋的題材行情；同一組個股只留最小（最具體）的題材
+                cmin = alerts.get("outside_cluster_min", 2)
+                hits: dict[str, list[str]] = {}
+                for c, n in zip(out.code, out.name):
+                    for th in tmap.get(c, []):
+                        hits.setdefault(th, []).append(f"{c} {n}")
+                seen, clusters = set(), []
+                for th, cs in sorted(hits.items(), key=lambda kv: (-len(kv[1]), tsize.get(kv[0], 999))):
+                    if len(cs) >= cmin and frozenset(cs) not in seen:
+                        seen.add(frozenset(cs)); clusters.append(f"- {th}（題材共 {tsize.get(th, '?')} 檔）：{'、'.join(cs)}")
+                if clusters:
+                    md += ["題材聚集（清單外同題材多檔同時流入 → 可能是族群清單沒涵蓋的行情，要追蹤就加進 groups.yaml）：", *clusters[:5]]
+            else:
+                md.append("- 無")
     md += ["\n## 自選標的", wt.to_markdown(index=False)]
     if mode == "intraday":
         md.append("短窗量比：最近 N 分鐘量 ÷ 20 日同時段均量，後附窗口漲跌；* = 延遲資料。量比(換算) 為全日換算，僅供參考。")

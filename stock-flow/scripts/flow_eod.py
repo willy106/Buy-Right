@@ -5,17 +5,20 @@
   python flow_eod.py                        # 今日
   python flow_eod.py --top 8 --chart /tmp/flow_eod.png --json /tmp/flow_eod.json
   python flow_eod.py --history 5            # 用快取比較近 5 日族群法人淨額趨勢
+  多週期（3／5／10／20 日）流向預設會印；快取不足時先跑 flow_backfill.py
 
 指標（每族群，單位百萬 NT$）:
   foreign_M / trust_M / dealer_M / inst_M   外資／投信／自營／合計淨買超金額（張×收盤價）
   turnover_M, share_pct, share_vs_5d        成交值、佔比、佔比相對近 5 日
   inst_vs_turnover_pct                      法人淨額 / 族群成交值 %  ← 法人主導程度
   avg_chg, up/down, top_buy / top_sell      族群內法人買最多／賣最多的個股
+  share_Nd / inst_Nd / flow_Nd              N 日成交佔比變化（vs 再往前 20 日）、N 日法人淨額合計、流入／流出判定
 """
 import argparse, json
 import numpy as np
 import pandas as pd
-from flowlib import load_groups, eod_prices, eod_problems, eod_institutional, snapshot_path, data_date, CACHE
+from flowlib import (load_groups, eod_prices, eod_problems, eod_institutional, snapshot_path, data_date, CACHE,
+                     inst_path, group_windows, windows_cell)
 
 
 def save_cache(df: pd.DataFrame, path, min_ratio: float = 0.9) -> bool:
@@ -91,6 +94,7 @@ if __name__ == "__main__":
     ap.add_argument("--groups"); ap.add_argument("--industry", action="store_true")
     ap.add_argument("--top", type=int, default=8); ap.add_argument("--chart"); ap.add_argument("--json")
     ap.add_argument("--history", type=int, default=0, help="顯示近 N 日族群法人淨額（需有快取）")
+    ap.add_argument("--windows", default="3,5,10,20", help="多週期流向的天數（逗號分隔；空字串關閉）")
     ap.add_argument("--allow-partial", action="store_true",
                     help="收盤資料不完整或兩市場日期不一致時仍輸出（不寫快取、結果標示為不完整）")
     a = ap.parse_args()
@@ -118,14 +122,27 @@ if __name__ == "__main__":
     out, merged = build(groups, px, inst)
     d = data_date(px)                                    # 以資料交易日命名，盤中跑也不會標錯日期
     if not probs:                                        # 不完整的資料不進快取（會污染 5 日基準與 --history）
-        if save_cache(px, snapshot_path("eod", d)) and not inst_missing:  # 價格供 5 日基準；法人不全就不寫族群快取
+        if save_cache(px, snapshot_path("eod", d)) and not inst_missing and not inst.empty:  # 價格供 5 日基準；法人不全就不寫族群快取
             out.to_csv(snapshot_path("eod_groups", d), index=False)
+            inst.to_csv(inst_path(d), index=False)       # 個股法人，多週期流向用現行族群清單重算
     cols = ["group", "inst_M", "foreign_M", "trust_M", "share_pct", "share_vs_5d", "inst_vs_turnover_pct", "avg_chg", "up", "down", "top_buy", "top_sell"]
     print("\n【法人淨流入 TOP】"); print(out.head(a.top)[cols].to_string(index=False))
     print("\n【法人淨流出 TOP】"); print(out.tail(a.top)[cols].iloc[::-1].to_string(index=False))
+    win = pd.DataFrame()
+    if a.windows:
+        win = group_windows(groups, tuple(int(x) for x in a.windows.split(",")))
+        ns = [int(x) for x in a.windows.split(",")]
+        print(f"\n【族群多週期流向】至 {win.attrs['upto']}（快取 {win.attrs['days']} 日；佔比變化 pp｜法人淨額 判定）")
+        shown = list(out.head(a.top).group) + list(out.tail(a.top).group[::-1])
+        t = win.set_index("group").loc[[g for g in shown if g in set(win.group)]].reset_index()
+        print(pd.DataFrame({"group": t["group"], **{f"{n}日": [windows_cell(r, n) for r in t.to_dict("records")] for n in ns}}).to_string(index=False))
+        if win.attrs["days"] < max(ns) + 5:
+            print(f"[info] 快取只有 {win.attrs['days']} 日，長週期會顯示「資料不足」；先跑 flow_backfill.py")
     if a.history:
         print_history(a.history)
     if a.chart:
         chart(out, a.chart)
     if a.json:
-        json.dump({"groups": out.to_dict("records")}, open(a.json, "w"), ensure_ascii=False, indent=2, default=str)
+        json.dump({"groups": out.to_dict("records"), "windows": win.to_dict("records"),
+                   "windows_upto": win.attrs.get("upto") if len(win) else None},
+                  open(a.json, "w"), ensure_ascii=False, indent=2, default=str)

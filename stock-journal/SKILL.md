@@ -13,9 +13,9 @@ python <skill_dir>/scripts/journal.py add 6239 --price 150 --qty 5 --name 力成
    --type 族群流入 --thesis "封測族群連3日資金流入，站回MA20" \
    --falsify "收盤跌破142或投信轉賣超3日" --falsify-price 142 --days 20
 #  動態證偽：--falsify-ma 5（每日盤後重算 MA5）；與 --falsify-price 並用時取較高者（守固定價，均線上來後改守均線）
-python <skill_dir>/scripts/journal.py check              # 盤後跑；也適合排程
+python <skill_dir>/scripts/journal.py check              # 盤後跑；也適合排程（也會追蹤已平倉單出場後第 5／10 日走勢）
 python <skill_dir>/scripts/journal.py close 3 --price 158 --reason 達標 --note "族群輪動"
-python <skill_dir>/scripts/journal.py review --months 3
+python <skill_dir>/scripts/journal.py review --months 3     # 加 --longterm 才另列長期持有
 python <skill_dir>/scripts/journal.py list --all
 python <skill_dir>/scripts/journal.py sync
 ```
@@ -35,17 +35,25 @@ python <skill_dir>/scripts/journal.py sync
 - 「情緒」出場佔比高、或證偽紀律率低 → 問題在執行不在方法，不要再談選股。
 - 某個論點類型 n < 5 → 明說樣本不足，不要下結論。
 - 「最高浮盈 − 實際獲利」大 → 賣飛或抱回來，可討論移動停利。
+- 「出場後走勢」（`post5_pct／post10_pct／post_max_pct`，相對出場價）：看整體是否系統性賣早，不要拿單筆隔天漲跌論對錯。「情緒」出場後續漲多 → 賣早；「證偽／停利」出場後續漲多 → 防守可能太緊。樣本 < 5 不下結論。
 - 平均持有遠超預計 → 凹單傾向，對照那些單子的損益。
 - 超額報酬（對同期大盤）才是選股能力；絕對報酬為正但超額 ≤ 0 → 只是搭大盤順風車。當沖單大盤基準記 0，超額≈絕對報酬，看選股能力時排除。
 - 不要因為結果好就說論點對（可能只是運氣），看的是論點成立與否、證偽有無觸發。
 
 使用者虧損時照實講數字，但對事不對人；不用鼓勵性的空話，也不要落井下石。
 
+## 交易成本
+- `close` 依 config 的 `fees` 算一買一賣成本並存入 `cost_amt／net_pnl_amt／net_pnl_pct`，日誌多一行「含成本」（含淨 R）。
+- 台股：手續費 = 成交金額 × 0.1425% × 折扣（每筆有最低），證交稅：股票 0.3%、ETF（00 開頭）0.1%、同日進出 0.15%；金額無條件捨去到元。美股預設 0，可設每筆固定或比例。
+- `review` 同時列毛／淨期望值與淨 R；舊資料沒有成本欄時依現行費率補算。
+- 使用者給的實際損益和算出來的不一致時，以使用者的券商對帳為準，並檢查 `fees` 的折扣與最低手續費。
+
 ## 風控整合（有裝 stock-risk 時自動）
 - `add` 帶 `--falsify-price` 會自動算建議部位並比對實際張數；`--stop-init` 可另外指定算 R 用的初始停損（預設＝證偽價）。**之後把停損上移到保本，也不要改 stop_init**，R 才算得對。
 - `check` 會寫入 `trail_stop`（移動停利，只上移）與 `falsify_level`（當日實際防守價＝固定價、動態 MA、移動停利取最高），日誌多一行大盤環境。
 - 出場原因多一個 `停利`：跌破移動停利出場用它，跌破原始證偽條件才用 `證偽`。
 - `review` 多了 R 倍數：虧損超過 1.2R 的單要點名（跳空還是拖延）。
+- `review` 另有**帳戶 R**（`acct_r`＝含成本淨損益換台幣 ÷ stock-risk 的 capital × risk_pct%，不含大盤係數）。使用者口中的「R」是帳戶 R；單筆 R（以 stop_init 算）看紀律、帳戶 R 看實際傷害，部位不足額時兩者差很多，回報時要講明是哪一種。`review` 也列**未平倉交易單**：現在／停損（證偽價）／停利（移動停利）三個價位出場時的帳戶 R（皆含成本）與哪個先觸發；回報未平倉單時一定要講停損與停利時的帳戶 R。長期持有預設不列，使用者特別提才加 `--longterm`（未平倉自開始追蹤日起算）。
 
 ## 與工具箱其他 skill 的關係
 - 進場論點若來自盯盤報告，把 `stock-watch` 當時的族群排名寫進 `--thesis`。

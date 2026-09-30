@@ -10,7 +10,10 @@
 import argparse
 from datetime import date, timedelta
 import pandas as pd
-from data import normalize, tw_code, yf_info, finmind, dump
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stock-common"))   # 共用資料層
+from stockdata import normalize, tw_code, yf_info, finmind, dump
 
 
 def _pct(v):

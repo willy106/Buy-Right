@@ -2,6 +2,7 @@
 chg_pct_abs: 3.0          # 漲跌幅超過 ±3% 提醒
 near_level_pct: 1.0       # 距昨高/昨低、MA20 在 1% 內提醒
 group_top_n: 5            # 族群流入/流出各列幾個
+group_windows: [3, 5, 10, 20]  # 族群多週期流向的天數（盤後快取；不足先跑 stock-flow/scripts/flow_backfill.py）
 
 # 盤中短窗量比（flow_surge.py）：最近 N 分鐘量 ÷ 過去 20 日同時段均量
 surge_window_min: 5       # 窗口分鐘
@@ -10,6 +11,10 @@ surge_hot: 3.0            # ≥ 此倍數標「爆量」
 surge_min_ret_pct: 0.2    # 窗口漲跌超過 ±此 % 才算流入/流出，否則「價平」
 surge_min_lots: 50        # 異動排行只列窗口成交 ≥ 此張數（濾掉冷門股）
 surge_top_n: 10           # 異動排行列幾檔
+surge_universe: market    # groups = 只掃族群清單＋自選；market = 再加全市場普通股（找清單外的異動）
+surge_min_turnover_m: 50  # market 模式：昨日成交值 ≥ 此百萬元才掃（約 570 檔）
+outside_top_n: 8          # 「清單外異動」列幾檔
+outside_cluster_min: 2    # 清單外同題材幾檔同時流入才列「題材聚集」
 
 # 持倉族群流出警示（盤中，只提醒、不是出場規則）
 # 觸發：持倉所屬族群「連續 N 次」判定流出（在流出前 group_top_n 名，或 跌家>漲家 且平均漲幅<0）

@@ -10,6 +10,7 @@
 | `stock-fa` | 基本面：月營收、8 季財報、本益比河流圖、同業比較 |
 | `stock-risk` | 風控：大盤環境（多頭／震盪／空頭）、部位大小（1R）、移動停利 |
 | `stock-journal` | 交易日誌：進場論點與證偽條件、每日檢查、檢討統計，rclone 同步 Google Drive |
+| `stock-common` | 共用資料層（非 skill）：行情、FinMind、快取，上面各 skill 共用 |
 
 ## 安裝
 1. 放到 `~/.claude/skills/`（或設 `STOCK_TOOLBOX` 指向此目錄）。
@@ -22,3 +23,8 @@
 4. 選用：`FINMIND_TOKEN`（FinMind 免費註冊，300 → 600 次/小時）。
 
 資料來源全部免費：證交所／櫃買 OpenAPI 與 mis 即時報價、yfinance、FinMind 免費層。本工具只做紀錄與分析，不下單、不構成投資建議。
+
+## 測試
+```bash
+python -m unittest discover -s stock-journal/tests -v   # 不連網、不碰 ~/stock-journal
+```
