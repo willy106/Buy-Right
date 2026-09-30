@@ -117,18 +117,31 @@ def realtime_quotes(codes: list[str], mkt: dict[str, str], batch=90, pause=3.0) 
                 v = r.get(k, "-")
                 try: return float(v) if v not in ("-", "", None) else None
                 except ValueError: return None
-            ask = r.get("a", "").split("_")[0]; bid = r.get("b", "").split("_")[0]
+            def best(k):
+                # 五檔以 "_" 分隔；第一檔可能是 0.0000（市價單），取第一個正價
+                for p in r.get(k, "").split("_"):
+                    try:
+                        if float(p) > 0: return float(p)
+                    except ValueError:
+                        pass
+                return None
             rows.append({"code": r.get("c"), "name": r.get("n"), "last": f("z"), "prev": f("y"), "open": f("o"),
                          "high": f("h"), "low": f("l"), "vol_lots": f("v"), "tick_vol": f("tv"),
-                         "ask": float(ask) if ask not in ("", "-") else None, "bid": float(bid) if bid not in ("", "-") else None,
+                         "ask": best("a"), "bid": best("b"), "limit_up": f("u"), "limit_dn": f("w"),
                          "time": r.get("t")})
         if i + batch < len(codes):
             time.sleep(pause)
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    # 盤中未成交時 z 為 '-'，退回用 (bid+ask)/2 或昨收
-    df["last"] = df["last"].fillna((df["bid"] + df["ask"]) / 2).fillna(df["prev"])
+    # 盤中未成交時 z 為 '-'。漲停鎖死（無賣單、買一＝漲停價）／跌停鎖死（無買單、賣一＝跌停價）
+    # 時 (bid+ask)/2 算不出來，舊寫法會退回昨收、把漲跌停股誤判成 0%，這裡先補上漲跌停價。
+    lu = df["last"].isna() & df["ask"].isna() & df["bid"].notna() & (df["bid"] >= df["limit_up"])
+    ld = df["last"].isna() & df["bid"].isna() & df["ask"].notna() & (df["ask"] <= df["limit_dn"])
+    df.loc[lu, "last"] = df.loc[lu, "limit_up"]
+    df.loc[ld, "last"] = df.loc[ld, "limit_dn"]
+    # 其餘：(bid+ask)/2 → 單邊報價 → 昨收
+    df["last"] = df["last"].fillna((df["bid"] + df["ask"]) / 2).fillna(df["bid"]).fillna(df["ask"]).fillna(df["prev"])
     df["chg_pct"] = (df["last"] / df["prev"] - 1) * 100
     # 成交金額估計：VWAP 用 (o+h+l+last)/4 近似，誤差通常 <2%
     vwap = df[["open", "high", "low", "last"]].mean(axis=1).fillna(df["last"])

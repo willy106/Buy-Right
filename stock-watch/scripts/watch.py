@@ -60,6 +60,35 @@ def load_journal() -> dict[str, dict]:
     return {}
 
 
+def live_defense(j, cur_p) -> tuple[float | None, str]:
+    """持倉當下防守價與標籤。journal 的 falsify_level 是上次 check（前一交易日）算的；
+    動態 MA 證偽要把「現價」當今日收盤重算（與 check 盤後的算法一致），否則會顯示前一天的 MA。
+    回傳 (防守價, 標籤)，取固定證偽價、動態 MA、移動停利三者最高。"""
+    cand = {}
+    if pd.notna(j.get("falsify_price")) and j.get("falsify_price"):
+        cand["證偽價"] = float(j["falsify_price"])
+    n = int(j["falsify_ma"]) if pd.notna(j.get("falsify_ma")) and j.get("falsify_ma") else 0
+    if n and cur_p:
+        try:
+            common = find_skill("stock-ta").parents[1] / "stock-common"
+            if str(common) not in sys.path:
+                sys.path.insert(0, str(common))
+            from stockdata import fetch_ohlcv
+            closes = fetch_ohlcv(str(j["code"]), "6mo", drop_today=True)[0]["Close"]
+            if len(closes) >= n - 1:
+                cand[f"證偽價(MA{n})"] = round((float(closes.tail(n - 1).sum()) + float(cur_p)) / n, 2)
+        except BaseException as e:   # fetch_ohlcv 失敗會 SystemExit
+            print(f"[warn] {j['code']} 動態 MA 重算失敗，改用上次 check 的防守價: {e}")
+    if n and not any(k.startswith("證偽價(MA") for k in cand) and pd.notna(j.get("falsify_level")):
+        cand[f"證偽價(MA{n}，前日)"] = float(j["falsify_level"])
+    if pd.notna(j.get("trail_stop")) and j.get("trail_stop"):
+        cand["移動停利"] = float(j["trail_stop"])
+    if not cand:
+        return None, "證偽價"
+    lab = max(cand, key=cand.get)
+    return round(cand[lab], 2), lab
+
+
 def load_watchlist(extra: list[str]) -> dict[str, list[str]]:
     p = ASSETS / "watchlist.yaml"   # 個人清單（不進 git）；沒有就用範本
     wl = yaml.safe_load((p if p.exists() else ASSETS / "watchlist.example.yaml").read_text(encoding="utf-8")) or {}
@@ -204,10 +233,8 @@ def main():
             if j is not None:
                 ent = float(j["entry_price"]); cur_p = r["現價"]
                 pnl = f"{(cur_p/ent-1)*100:+.1f}%" if cur_p else "-"
-                # 防守價：journal check 算好的 falsify_level（固定價、動態 MA、移動停利取最高），沒有才退回 falsify_price
-                fp = j.get("falsify_level") if pd.notna(j.get("falsify_level")) else j.get("falsify_price")
-                ts = j.get("trail_stop")
-                lab = "移動停利" if pd.notna(ts) and pd.notna(fp) and float(ts) >= float(fp) else "證偽價"
+                # 防守價：固定證偽價、動態 MA（以現價當今日收盤重算）、移動停利取最高
+                fp, lab = live_defense(j, cur_p)
                 near = ""
                 if pd.notna(fp) and fp and cur_p:
                     gap = (cur_p / float(fp) - 1) * 100
