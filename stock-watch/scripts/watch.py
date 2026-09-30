@@ -295,6 +295,25 @@ def main():
                     else ["group", "share_pct", "share_vs_5d", "avg_chg", "up", "down", "leaders"])
         md += ["\n## 族群流入", fg.head(n)[key_cols].to_markdown(index=False),
                "\n## 族群流出", fg.tail(n)[key_cols].iloc[::-1].to_markdown(index=False)]
+    # 族群多週期流向：上面列到的族群 + 持倉所屬族群，3／5／10／20 日（只讀盤後快取，盤中是到前一交易日）
+    wins = tuple(alerts.get("group_windows", [3, 5, 10, 20]))
+    try:
+        gw = flowlib.group_windows(groups, wins)
+    except Exception as e:
+        gw = pd.DataFrame(); print(f"[warn] 多週期族群流向失敗：{e}")
+    if len(gw):
+        shown = (list(fg.head(n).group) + list(fg.tail(n).group[::-1])) if len(fg) else []
+        shown += [g for c in held for g in group_of(c, groups)]
+        shown = [g for g in dict.fromkeys(shown) if g in set(gw.group)]
+        if shown:
+            t = gw.set_index("group").loc[shown].reset_index()
+            tbl = pd.DataFrame({"族群": t["group"], **{f"{w}日": [flowlib.windows_cell(r, w) for r in t.to_dict("records")] for w in wins}})
+            upto = gw.attrs.get("upto")
+            md += [f"\n## 族群多週期流向（至 {upto} 盤後，快取 {gw.attrs.get('days')} 日）",
+                   "每格＝成交佔比變化 pp（近 N 日均 vs 再往前 20 日）｜三大法人 N 日淨額；流入＝佔比↑且法人買，流出＝兩者皆↓。",
+                   tbl.to_markdown(index=False)]
+            if gw.attrs.get("days", 0) < max(wins) + 5:
+                md.append(f"（快取只有 {gw.attrs.get('days')} 日，長週期資料不足：跑 `stock-flow/scripts/flow_backfill.py` 補齊）")
     if len(sg):
         sn = alerts["surge_top_n"]
         top = sg[(sg.win_lots.fillna(0) >= alerts["surge_min_lots"])].sort_values("ratio", ascending=False).head(sn).copy()

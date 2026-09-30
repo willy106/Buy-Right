@@ -2,6 +2,7 @@
 chg_pct_abs: 3.0          # 漲跌幅超過 ±3% 提醒
 near_level_pct: 1.0       # 距昨高/昨低、MA20 在 1% 內提醒
 group_top_n: 5            # 族群流入/流出各列幾個
+group_windows: [3, 5, 10, 20]  # 族群多週期流向的天數（盤後快取；不足先跑 stock-flow/scripts/flow_backfill.py）
 
 # 盤中短窗量比（flow_surge.py）：最近 N 分鐘量 ÷ 過去 20 日同時段均量
 surge_window_min: 5       # 窗口分鐘
